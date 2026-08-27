@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord to OpenRouter LLM bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/discord-llm-bot
+EnvironmentFile=/home/pi/discord-llm-bot/.env
+ExecStart=/home/pi/discord-llm-bot/venv/bin/python3 /home/pi/discord-llm-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
