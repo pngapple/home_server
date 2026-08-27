@@ -8,7 +8,7 @@ Type=simple
 User=mjxu
 WorkingDirectory=/home/mjxu/home_server
 EnvironmentFile=/home/mjxu/home_server/.env
-ExecStart=/home/mjxu/home_server/venv/bin/python3 /home/mjxu/home_server/bot.py
+ExecStart=/home/mjxu/home_server/venv/bin/python3 -m bot
 Restart=on-failure
 RestartSec=5
 
