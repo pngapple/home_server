@@ -59,6 +59,20 @@ def _record_metrics(data: dict) -> None:
         )
 
 
+# Restarting/stopping/killing this bot's own systemd unit (or rebooting the
+# whole Pi) from inside a bridge session kills that session's own subprocess
+# mid-run before it can report back — and, worse, kills every OTHER
+# concurrently-running bridge session too, since systemd tears down the
+# whole cgroup on stop. Blocking it outright forces an explicit, separate
+# human action (a chat message asking the actual owner, or done directly by
+# this session) instead of an agent unilaterally pulling the rug out.
+_SELF_RESTART_DISALLOWED_TOOLS = [
+    f"Bash({prefix}systemctl {action} discord-llm-bot*)"
+    for prefix in ("", "sudo ")
+    for action in ("restart", "stop", "kill")
+] + [f"Bash({prefix}{cmd}*)" for prefix in ("", "sudo ") for cmd in ("reboot", "shutdown", "poweroff", "halt")]
+
+
 def is_trigger(text: str) -> bool:
     return text.strip().lower().startswith(TRIGGER_PREFIX)
 
@@ -80,7 +94,17 @@ def has_session(channel_id: int) -> bool:
 
 async def run(channel_id: int, prompt: str) -> str:
     session_id = _sessions.get(channel_id)
-    args = [config.CLAUDE_CODE_BINARY, "-p", prompt, "--permission-mode", "auto", "--output-format", "json"]
+    args = [
+        config.CLAUDE_CODE_BINARY,
+        "-p",
+        prompt,
+        "--permission-mode",
+        "auto",
+        "--output-format",
+        "json",
+        "--disallowedTools",
+        *_SELF_RESTART_DISALLOWED_TOOLS,
+    ]
     if session_id:
         args += ["--resume", session_id]
     else:
