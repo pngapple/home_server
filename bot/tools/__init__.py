@@ -92,3 +92,4 @@ register(
 # Import tool modules so their register(...) calls run. Add new tools here.
 from . import reminders  # noqa: E402,F401
 from . import calendar  # noqa: E402,F401
+from . import kasa  # noqa: E402,F401

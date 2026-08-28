@@ -43,3 +43,9 @@ GOOGLE_REDIRECT_URI = os.environ.get(
     "GOOGLE_REDIRECT_URI", "http://raspberrypi.tail4ce93a.ts.net/calendar/oauth/callback"
 )
 GOOGLE_OAUTH_SERVER_PORT = int(os.environ.get("GOOGLE_OAUTH_SERVER_PORT", "8788"))
+
+# Kasa smart plugs (see tools/kasa.py). One shared account for the whole
+# household — nobody but the server ever needs these credentials, since
+# control happens through the bot, not the Kasa app.
+KASA_USERNAME = os.environ.get("KASA_USERNAME")
+KASA_PASSWORD = os.environ.get("KASA_PASSWORD")
