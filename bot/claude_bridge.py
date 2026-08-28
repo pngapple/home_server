@@ -37,6 +37,7 @@ def _record_metrics(data: dict) -> None:
     one."""
     model_usage = data.get("modelUsage") or {}
     duration_s = (data.get("duration_ms") or 0) / 1000
+    metrics.add_claude_code_cost(data.get("total_cost_usd") or 0.0)
     if not model_usage:
         usage = data.get("usage") or {}
         metrics.record(

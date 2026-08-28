@@ -47,6 +47,7 @@ GOOGLE_OAUTH_SERVER_PORT = int(os.environ.get("GOOGLE_OAUTH_SERVER_PORT", "8788"
 # LLM metrics dashboard (bot/llm_status_server.py), reverse-proxied at /llm/
 # the same way the oauth callback and Netdata are — see sites-available/status.
 LLM_STATUS_SERVER_PORT = int(os.environ.get("LLM_STATUS_SERVER_PORT", "8791"))
+LLM_METRICS_FILE = os.environ.get("LLM_METRICS_FILE", "llm_metrics.json")
 
 # Kasa smart plugs (see tools/kasa.py). One shared account for the whole
 # household — nobody but the server ever needs these credentials, since

@@ -1,15 +1,25 @@
 """
-In-memory metrics for LLM calls, fed by both the OpenRouter chat path
-(llm.py) and the Claude Code bridge (claude_bridge.py). Consumed by
-llm_status_server.py for the /llm/ dashboard.
+Metrics for LLM calls, fed by both the OpenRouter chat path (llm.py) and the
+Claude Code bridge (claude_bridge.py). Consumed by llm_status_server.py for
+the /llm/ dashboard.
 
-Lost on restart — same tradeoff as the chat history in llm.py, and fine for
-the same reason: this is an at-a-glance dashboard, not an audit log.
+The call history (and therefore total tokens/calls/avg tok-s, all derived
+from it) and cumulative Claude Code spend persist to disk across restarts —
+see _load()/_save() below. Uptime deliberately does NOT persist: it's meant
+to show time since this process last started, which is useful signal in
+itself (a suspiciously low uptime means the bot crashed/restarted
+recently) — carrying it over would hide that.
 """
 
+import json
+import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+
+from . import config
+
+log = logging.getLogger("discord-llm-bot.metrics")
 
 _START_TIME = time.monotonic()
 _MAX_RECENT = 200
@@ -32,6 +42,48 @@ class Call:
 
 _recent: deque[Call] = deque(maxlen=_MAX_RECENT)
 
+# Claude Code doesn't expose a remaining-balance/quota endpoint the way
+# OpenRouter does (see llm_status_server.py's live credits fetch) — this is
+# just accumulated `total_cost_usd` from each headless invocation's JSON
+# output, so "spend so far", not "spend vs. a known limit".
+_claude_code_cost_usd = 0.0
+
+
+def _load() -> None:
+    global _claude_code_cost_usd
+    try:
+        with open(config.LLM_METRICS_FILE, "r") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return
+    except (json.JSONDecodeError, OSError):
+        log.exception("Failed to read %s, starting with empty metrics", config.LLM_METRICS_FILE)
+        return
+    for c in data.get("recent", []):
+        _recent.append(Call(**c))
+    _claude_code_cost_usd = data.get("claude_code_cost_usd", 0.0)
+
+
+def _save() -> None:
+    data = {
+        "recent": [asdict(c) for c in _recent],
+        "claude_code_cost_usd": _claude_code_cost_usd,
+    }
+    try:
+        with open(config.LLM_METRICS_FILE, "w") as f:
+            json.dump(data, f)
+    except OSError:
+        log.exception("Failed to write %s", config.LLM_METRICS_FILE)
+
+
+_load()
+
+
+def add_claude_code_cost(cost_usd: float) -> None:
+    global _claude_code_cost_usd
+    _claude_code_cost_usd += cost_usd
+    _save()
+
 
 def record(
     source: str,
@@ -42,6 +94,7 @@ def record(
     context_window: int | None = None,
 ) -> None:
     _recent.append(Call(source, model, input_tokens, output_tokens, duration_s, context_window))
+    _save()
 
 
 def snapshot() -> dict:
@@ -80,4 +133,5 @@ def snapshot() -> dict:
         "avg_tokens_per_sec": round(avg_tps, 1),
         "last": call_dict(last) if last else None,
         "recent": [call_dict(c) for c in reversed(calls[-25:])],
+        "claude_code_cost_usd": round(_claude_code_cost_usd, 4),
     }
