@@ -33,6 +33,18 @@ def chunk(text: str, limit: int = config.DISCORD_MESSAGE_LIMIT):
         yield text[i : i + limit]
 
 
+_THREAD_TITLE_PREFIX = "Claude Code: "
+_DISCORD_THREAD_NAME_LIMIT = 100
+
+
+def _thread_title(prompt: str) -> str:
+    summary = prompt.strip().splitlines()[0]
+    budget = _DISCORD_THREAD_NAME_LIMIT - len(_THREAD_TITLE_PREFIX)
+    if len(summary) > budget:
+        summary = summary[: budget - 1].rstrip() + "…"
+    return _THREAD_TITLE_PREFIX + summary
+
+
 # ---------------------------------------------------------------------------
 # Discord event handlers
 # ---------------------------------------------------------------------------
@@ -114,7 +126,7 @@ async def on_message(message: discord.Message):
         if isinstance(message.channel, discord.TextChannel):
             try:
                 target = await message.create_thread(
-                    name=prompt[:80] or "Claude Code", auto_archive_duration=1440
+                    name=_thread_title(prompt), auto_archive_duration=1440
                 )
             except discord.HTTPException:
                 log.exception("Failed to create thread for Claude Code bridge, replying inline instead")
