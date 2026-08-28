@@ -59,5 +59,36 @@ def dispatch(name: str, arguments: dict, ctx: ToolContext) -> str:
         return f"Error: tool '{name}' failed unexpectedly."
 
 
+# A no-op the model can pick when nothing else applies. llm.py forces
+# tool_choice="required" on the first turn of every message so the model
+# can't just skip tool-calling and free-text a claimed result (it did
+# exactly that for a set_reminder request once, silently) — this is the
+# escape hatch for when no real tool actually applies, so ordinary
+# conversation still works, and every "no action" decision is logged
+# instead of being invisible.
+def _handle_no_action(arguments: dict, ctx: ToolContext) -> str:
+    return "No tool action needed for this message."
+
+
+register(
+    "no_action_needed",
+    {
+        "type": "function",
+        "function": {
+            "name": "no_action_needed",
+            "description": (
+                "Call this when the message is just conversation, a "
+                "question, or anything else that doesn't require any of "
+                "the other tools. You'll still give your normal "
+                "natural-language reply right after."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    _handle_no_action,
+)
+
+
 # Import tool modules so their register(...) calls run. Add new tools here.
 from . import reminders  # noqa: E402,F401
+from . import calendar  # noqa: E402,F401

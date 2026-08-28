@@ -5,7 +5,7 @@ OpenRouter chat wrapper: per-channel history plus a tool-calling loop.
 import json
 import logging
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -22,12 +22,19 @@ history: dict[int, deque] = defaultdict(lambda: deque(maxlen=config.HISTORY_TURN
 MAX_TOOL_ITERATIONS = 5
 
 
-def call_openrouter(messages: list[dict], tools: list[dict] | None = None, timeout: int = 60) -> dict:
+def call_openrouter(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    tool_choice: str | None = None,
+    timeout: int = 60,
+) -> dict:
     """Sends one chat completion request and returns the response message
     (a dict with "role", "content", and possibly "tool_calls")."""
     payload = {"model": config.OPENROUTER_MODEL, "messages": messages}
     if tools:
         payload["tools"] = tools
+    if tool_choice:
+        payload["tool_choice"] = tool_choice
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
@@ -45,9 +52,19 @@ def call_openrouter(messages: list[dict], tools: list[dict] | None = None, timeo
 
 def _system_prompt() -> str:
     now_local = datetime.now(config.LOCAL_TZ)
+    # Small/fast models are unreliable at mental date arithmetic (e.g.
+    # miscounting "next Monday" across a month boundary). Handing over a
+    # precomputed lookup table turns that into a lookup instead of a
+    # calculation, which is much more reliable.
+    upcoming_dates = "\n".join(
+        f"{(now_local + timedelta(days=i)):%A, %Y-%m-%d}" + (" (today)" if i == 0 else "")
+        for i in range(14)
+    )
     return (
         f"{config.SYSTEM_PROMPT}\n\n"
-        f"Current local date/time: {now_local:%A, %Y-%m-%d %H:%M} ({config.TIMEZONE})."
+        f"Current local date/time: {now_local:%A, %Y-%m-%d %H:%M} ({config.TIMEZONE}).\n\n"
+        f"Upcoming dates for reference (use these directly instead of "
+        f"calculating weekdays yourself):\n{upcoming_dates}"
     )
 
 
@@ -63,8 +80,14 @@ def ask_llm(message, user_text: str) -> str:
     messages.extend(history[channel_id])
     messages.append({"role": "user", "content": user_text})
 
-    for _ in range(MAX_TOOL_ITERATIONS):
-        reply_message = call_openrouter(messages, tools=tool_schemas)
+    for i in range(MAX_TOOL_ITERATIONS):
+        # Force the first decision on a fresh message through actual
+        # tool-calling (real tool or the no_action_needed no-op) instead of
+        # letting the model silently free-text a claimed result. Once that
+        # decision's been made, later turns just need to wrap up in plain
+        # text, so let those be unconstrained.
+        tool_choice = "required" if i == 0 else "auto"
+        reply_message = call_openrouter(messages, tools=tool_schemas, tool_choice=tool_choice)
         tool_calls = reply_message.get("tool_calls")
 
         if not tool_calls:

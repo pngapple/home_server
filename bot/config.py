@@ -35,3 +35,11 @@ TIMEZONE = os.environ.get("TIMEZONE", "America/Indiana/Indianapolis")
 LOCAL_TZ = ZoneInfo(TIMEZONE)
 
 REMINDERS_FILE = os.environ.get("REMINDERS_FILE", "reminders.json")
+
+# Google Calendar OAuth (per-Discord-user linking, see tools/calendar.py).
+GOOGLE_CLIENT_SECRETS_FILE = os.environ.get("GOOGLE_CLIENT_SECRETS_FILE", "client_secret.json")
+GOOGLE_CALENDAR_TOKENS_FILE = os.environ.get("GOOGLE_CALENDAR_TOKENS_FILE", "calendar_tokens.json")
+GOOGLE_REDIRECT_URI = os.environ.get(
+    "GOOGLE_REDIRECT_URI", "http://raspberrypi.tail4ce93a.ts.net/calendar/oauth/callback"
+)
+GOOGLE_OAUTH_SERVER_PORT = int(os.environ.get("GOOGLE_OAUTH_SERVER_PORT", "8788"))

@@ -19,7 +19,7 @@ import re
 
 import discord
 
-from . import config
+from . import config, oauth_server
 from .discord_client import client
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
@@ -49,6 +49,7 @@ async def on_ready():
     if not _pending_rescheduled:
         _pending_rescheduled = True
         reschedule_pending()
+        client.loop.create_task(oauth_server.start())
 
 
 @client.event

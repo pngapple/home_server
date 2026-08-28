@@ -2,3 +2,5 @@
 venv/
 __pycache__/
 reminders.json
+client_secret.json
+calendar_tokens.json
