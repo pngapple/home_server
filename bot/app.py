@@ -19,7 +19,7 @@ import re
 
 import discord
 
-from . import config, oauth_server
+from . import claude_bridge, config, oauth_server
 from .discord_client import client
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
@@ -52,9 +52,35 @@ async def on_ready():
         client.loop.create_task(oauth_server.start())
 
 
+async def _run_claude_bridge(channel, prompt: str) -> None:
+    log.info("Claude Code bridge prompt in channel %s: %r", channel.id, prompt)
+    async with channel.typing():
+        try:
+            reply = await claude_bridge.run(channel.id, prompt)
+        except Exception:
+            log.exception("Claude Code bridge failed")
+            await channel.send(
+                "Sorry, something went wrong running Claude Code. Check the "
+                "server logs (`journalctl -u discord-llm-bot -n 50`)."
+            )
+            return
+    for part in chunk(reply):
+        await channel.send(part)
+
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
+        return
+
+    # Inside a thread that already has a Claude Code session running, every
+    # message from the owner continues it directly — no @mention or !code
+    # prefix needed, since the thread itself is the dedicated scope for it.
+    if isinstance(message.channel, discord.Thread) and claude_bridge.has_session(message.channel.id):
+        if not claude_bridge.is_authorized(message.author.id):
+            return
+        if message.content.strip():
+            await _run_claude_bridge(message.channel, message.content)
         return
 
     is_dm = isinstance(message.channel, discord.DMChannel)
@@ -70,6 +96,31 @@ async def on_message(message: discord.Message):
         return
 
     log.info("Message from %s (dm=%s, mention=%s): %r", message.author, is_dm, is_mention, text)
+
+    if claude_bridge.is_trigger(text):
+        if not claude_bridge.is_authorized(message.author.id):
+            await message.channel.send("You're not authorized to use Claude Code through this bot.")
+            return
+        prompt = claude_bridge.strip_trigger(text)
+        if not prompt:
+            await message.channel.send(f"Usage: `{claude_bridge.TRIGGER_PREFIX} <prompt>`")
+            return
+
+        # Guild text channels get a dedicated thread so follow-ups don't need
+        # the prefix repeated; DMs and other channel types can't have
+        # threads, so they just keep responding in place.
+        target = message.channel
+        if isinstance(message.channel, discord.TextChannel):
+            try:
+                target = await message.create_thread(
+                    name=prompt[:80] or "Claude Code", auto_archive_duration=1440
+                )
+            except discord.HTTPException:
+                log.exception("Failed to create thread for Claude Code bridge, replying inline instead")
+                target = message.channel
+
+        await _run_claude_bridge(target, prompt)
+        return
 
     async with message.channel.typing():
         try:

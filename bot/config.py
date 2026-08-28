@@ -49,3 +49,14 @@ GOOGLE_OAUTH_SERVER_PORT = int(os.environ.get("GOOGLE_OAUTH_SERVER_PORT", "8788"
 # control happens through the bot, not the Kasa app.
 KASA_USERNAME = os.environ.get("KASA_USERNAME")
 KASA_PASSWORD = os.environ.get("KASA_PASSWORD")
+
+# Direct bridge to a real headless Claude Code session (bot/claude_bridge.py)
+# — full shell/file access on this server, so restricted to a single owner
+# Discord user id. Unset (None) means the bridge is disabled for everyone.
+_owner_id = os.environ.get("CLAUDE_CODE_OWNER_ID")
+CLAUDE_CODE_OWNER_ID = int(_owner_id) if _owner_id else None
+CLAUDE_CODE_WORKDIR = os.environ.get("CLAUDE_CODE_WORKDIR", "/home/mjxu/home_server")
+CLAUDE_CODE_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_CODE_TIMEOUT_SECONDS", "600"))
+# Absolute path, not just "claude" — the systemd service's PATH doesn't
+# include ~/.local/bin, where the CLI actually lives.
+CLAUDE_CODE_BINARY = os.environ.get("CLAUDE_CODE_BINARY", "/home/mjxu/.local/bin/claude")
