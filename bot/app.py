@@ -19,7 +19,7 @@ import re
 
 import discord
 
-from . import claude_bridge, config, oauth_server
+from . import claude_bridge, config, llm_status_server, oauth_server
 from .discord_client import client
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
@@ -50,6 +50,7 @@ async def on_ready():
         _pending_rescheduled = True
         reschedule_pending()
         client.loop.create_task(oauth_server.start())
+        client.loop.create_task(llm_status_server.start())
 
 
 async def _run_claude_bridge(channel, prompt: str) -> None:

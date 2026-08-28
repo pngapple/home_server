@@ -14,10 +14,11 @@ instead of resuming the old one, not that history is corrupted.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 
-from . import config
+from . import config, metrics
 
 log = logging.getLogger("discord-llm-bot.claude_bridge")
 
@@ -25,6 +26,36 @@ TRIGGER_PREFIX = "!code"
 
 # channel_id -> claude session id (uuid4 string)
 _sessions: dict[int, str] = {}
+
+
+def _record_metrics(data: dict) -> None:
+    """Pulls per-model token usage out of `claude -p --output-format json`
+    output. modelUsage is keyed by the raw model id and has one entry per
+    model actually used in the turn (usually one, but a fallback/retry can
+    involve more than one) — duration_ms covers the whole call, so a
+    multi-model turn gets an approximate per-model rate rather than an exact
+    one."""
+    model_usage = data.get("modelUsage") or {}
+    duration_s = (data.get("duration_ms") or 0) / 1000
+    if not model_usage:
+        usage = data.get("usage") or {}
+        metrics.record(
+            source="claude-code",
+            model="unknown",
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            duration_s=duration_s,
+        )
+        return
+    for model_id, mu in model_usage.items():
+        metrics.record(
+            source="claude-code",
+            model=mu.get("canonicalModel", model_id),
+            input_tokens=mu.get("inputTokens", 0),
+            output_tokens=mu.get("outputTokens", 0),
+            duration_s=duration_s,
+            context_window=mu.get("contextWindow"),
+        )
 
 
 def is_trigger(text: str) -> bool:
@@ -48,7 +79,7 @@ def has_session(channel_id: int) -> bool:
 
 async def run(channel_id: int, prompt: str) -> str:
     session_id = _sessions.get(channel_id)
-    args = [config.CLAUDE_CODE_BINARY, "-p", prompt, "--permission-mode", "auto"]
+    args = [config.CLAUDE_CODE_BINARY, "-p", prompt, "--permission-mode", "auto", "--output-format", "json"]
     if session_id:
         args += ["--resume", session_id]
     else:
@@ -84,4 +115,12 @@ async def run(channel_id: int, prompt: str) -> str:
         log.warning("claude -p exited %s: %s", proc.returncode, err[:2000])
         return f"Error: Claude Code exited with an error.\n{err[-1500:]}"
 
-    return stdout.decode(errors="replace").strip() or "(no output)"
+    raw = stdout.decode(errors="replace").strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("claude -p --output-format json returned non-JSON stdout: %r", raw[:500])
+        return raw or "(no output)"
+
+    _record_metrics(data)
+    return data.get("result") or "(no output)"

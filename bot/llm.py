@@ -4,12 +4,13 @@ OpenRouter chat wrapper: per-channel history plus a tool-calling loop.
 
 import json
 import logging
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
 import requests
 
-from . import config
+from . import config, metrics
 from .tools import ToolContext, dispatch, get_tool_schemas
 
 log = logging.getLogger("discord-llm-bot.llm")
@@ -20,6 +21,27 @@ history: dict[int, deque] = defaultdict(lambda: deque(maxlen=config.HISTORY_TURN
 # Safety cap on tool-call round trips per user message, in case the model
 # gets stuck calling tools instead of answering.
 MAX_TOOL_ITERATIONS = 5
+
+# model slug -> context length, lazily fetched from OpenRouter's public
+# model catalog and cached for the life of the process (context windows
+# don't change at runtime, so there's no need to ever refetch).
+_context_windows: dict[str, int] = {}
+
+
+def _context_window(model: str) -> int | None:
+    if model in _context_windows:
+        return _context_windows[model]
+    try:
+        resp = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
+        resp.raise_for_status()
+        for entry in resp.json().get("data", []):
+            length = entry.get("context_length")
+            if entry.get("id") and length:
+                _context_windows[entry["id"]] = length
+    except Exception:
+        log.warning("Failed to fetch OpenRouter model catalog for context-window lookup", exc_info=True)
+        return None
+    return _context_windows.get(model)
 
 
 def call_openrouter(
@@ -35,6 +57,7 @@ def call_openrouter(
         payload["tools"] = tools
     if tool_choice:
         payload["tool_choice"] = tool_choice
+    start = time.monotonic()
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
@@ -46,8 +69,20 @@ def call_openrouter(
         json=payload,
         timeout=timeout,
     )
+    duration_s = time.monotonic() - start
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
+    data = resp.json()
+    usage = data.get("usage") or {}
+    model = data.get("model", config.OPENROUTER_MODEL)
+    metrics.record(
+        source="openrouter",
+        model=model,
+        input_tokens=usage.get("prompt_tokens", 0),
+        output_tokens=usage.get("completion_tokens", 0),
+        duration_s=duration_s,
+        context_window=_context_window(model),
+    )
+    return data["choices"][0]["message"]
 
 
 def _system_prompt() -> str:
