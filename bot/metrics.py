@@ -17,7 +17,7 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 
-from . import config
+from . import config, jsonstore
 
 log = logging.getLogger("discord-llm-bot.metrics")
 
@@ -60,7 +60,12 @@ def _load() -> None:
         log.exception("Failed to read %s, starting with empty metrics", config.LLM_METRICS_FILE)
         return
     for c in data.get("recent", []):
-        _recent.append(Call(**c))
+        # This module is imported at startup, so one malformed/outdated entry
+        # must not take the whole bot down with it.
+        try:
+            _recent.append(Call(**c))
+        except TypeError:
+            log.warning("Skipping unreadable metrics entry: %r", c)
     _claude_code_cost_usd = data.get("claude_code_cost_usd", 0.0)
 
 
@@ -70,8 +75,7 @@ def _save() -> None:
         "claude_code_cost_usd": _claude_code_cost_usd,
     }
     try:
-        with open(config.LLM_METRICS_FILE, "w") as f:
-            json.dump(data, f)
+        jsonstore.write(config.LLM_METRICS_FILE, data, indent=None)
     except OSError:
         log.exception("Failed to write %s", config.LLM_METRICS_FILE)
 
@@ -81,8 +85,9 @@ _load()
 
 def add_claude_code_cost(cost_usd: float) -> None:
     global _claude_code_cost_usd
-    _claude_code_cost_usd += cost_usd
-    _save()
+    with jsonstore.lock(config.LLM_METRICS_FILE):
+        _claude_code_cost_usd += cost_usd
+        _save()
 
 
 def record(
@@ -93,13 +98,16 @@ def record(
     duration_s: float,
     context_window: int | None = None,
 ) -> None:
-    _recent.append(Call(source, model, input_tokens, output_tokens, duration_s, context_window))
-    _save()
+    with jsonstore.lock(config.LLM_METRICS_FILE):
+        _recent.append(Call(source, model, input_tokens, output_tokens, duration_s, context_window))
+        _save()
 
 
 def snapshot() -> dict:
     """A plain-dict view of current stats, ready to serialize to JSON."""
-    calls = list(_recent)
+    with jsonstore.lock(config.LLM_METRICS_FILE):
+        calls = list(_recent)
+        claude_code_cost = _claude_code_cost_usd
     total_input = sum(c.input_tokens for c in calls)
     total_output = sum(c.output_tokens for c in calls)
 
@@ -133,5 +141,5 @@ def snapshot() -> dict:
         "avg_tokens_per_sec": round(avg_tps, 1),
         "last": call_dict(last) if last else None,
         "recent": [call_dict(c) for c in reversed(calls[-25:])],
-        "claude_code_cost_usd": round(_claude_code_cost_usd, 4),
+        "claude_code_cost_usd": round(claude_code_cost, 4),
     }

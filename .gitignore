@@ -5,3 +5,8 @@ reminders.json
 client_secret.json
 calendar_tokens.json
 llm_metrics.json
+deploy_notify.json
+cigarettes.json
+
+# transient files from jsonstore.write()
+*.json.tmp

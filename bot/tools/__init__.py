@@ -93,3 +93,4 @@ register(
 from . import reminders  # noqa: E402,F401
 from . import calendar  # noqa: E402,F401
 from . import kasa  # noqa: E402,F401
+from . import cigarettes  # noqa: E402,F401

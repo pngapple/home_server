@@ -8,16 +8,19 @@ actual on/off traffic never leaves the LAN — one shared credential for the
 household, held only here.
 
 Live `Device` objects are never cached across calls: each one holds a
-network connection tied to the asyncio event loop that created it, and
-_run_async() gives every call its own fresh loop (see below), so a cached
-device from an earlier call breaks with "attached to a different loop" /
-"Event loop is closed". Always connect fresh, act, and disconnect within a
-single _run_async() coroutine.
+network connection tied to the asyncio event loop that created it, and each
+call below gets its own fresh loop via asyncio.run(), so a cached device
+from an earlier call breaks with "attached to a different loop" / "Event
+loop is closed". Always connect fresh, act, and disconnect within a single
+asyncio.run() coroutine.
+
+asyncio.run() only works here because tool handlers run in a worker thread
+with no loop of its own (app.py hands ask_llm to asyncio.to_thread); calling
+one of these from the Discord event loop thread would raise.
 """
 
 import asyncio
 import logging
-import threading
 import time
 
 from kasa import Discover
@@ -27,32 +30,18 @@ from . import ToolContext, register
 
 log = logging.getLogger("discord-llm-bot.tools.kasa")
 
+# SECURITY TODO: these tools perform physical actions (cutting power to
+# whatever is plugged in) and have no authorization check — anyone who can
+# DM the bot or @mention it in a shared server can drive them through the
+# model. Unlike claude_bridge.py there's no owner gate here, and the tool
+# registry has no per-tool authz concept to hang one on. Deciding who may
+# actuate hardware (owner only? a household allowlist? per-guild?) is a
+# policy call, so it's left explicit here rather than silently assumed safe.
+
 # normalized alias -> (host, display alias, is_on as of last refresh)
 _CACHE: dict[str, tuple[str, str, bool]] = {}
 _CACHE_TS = 0.0
 _CACHE_TTL_SECONDS = 120
-
-
-def _run_async(coro):
-    """ask_llm() runs synchronously on the Discord client's own event-loop
-    thread, so we can't asyncio.run() directly here (a loop's already
-    running in this thread) or await (tool handlers are plain sync
-    functions). Run the coroutine on its own thread with its own fresh loop
-    instead, and block until it's done."""
-    result: dict = {}
-
-    def runner():
-        try:
-            result["value"] = asyncio.run(coro)
-        except Exception as exc:  # noqa: BLE001
-            result["error"] = exc
-
-    t = threading.Thread(target=runner)
-    t.start()
-    t.join()
-    if "error" in result:
-        raise result["error"]
-    return result["value"]
 
 
 def _normalize(s: str) -> str:
@@ -81,7 +70,7 @@ def _refresh_cache() -> None:
             await dev.disconnect()
         return info
 
-    info = _run_async(_discover_all())
+    info = asyncio.run(_discover_all())
     _CACHE.clear()
     for host, alias, is_on in info:
         _CACHE[_normalize(alias)] = (host, alias, is_on)
@@ -220,7 +209,7 @@ def handle_set_power(arguments: dict, ctx: ToolContext) -> str:
     host, alias, _ = hit
 
     try:
-        _run_async(_set_power(host, state == "on"))
+        asyncio.run(_set_power(host, state == "on"))
     except Exception:
         log.exception("Failed to set power for %s", name)
         return f"Error: couldn't reach '{alias}' to change its power state."
@@ -241,7 +230,7 @@ def handle_get_status(arguments: dict, ctx: ToolContext) -> str:
     host, alias, _ = hit
 
     try:
-        is_on = _run_async(_get_status(host))
+        is_on = asyncio.run(_get_status(host))
     except Exception:
         log.exception("Failed to refresh status for %s", name)
         return f"Error: couldn't reach '{alias}' to check its status."

@@ -1,12 +1,19 @@
 """
-Reminder tool: lets the LLM schedule a one-off DM to fire at a future local
-date/time.
+Reminder tool: lets the LLM schedule a one-off DM to fire either at a future
+local date/time, or the next time a geofence event (arriving/leaving home)
+comes in from bot/geofence_server.py.
 
 Stored as a flat JSON list on disk so they survive a restart. Deliberately
 not a database: this is a handful of personal reminders, not a workload.
 
   [{"id": "...", "author_id": 123, "text": "Admin meeting",
-    "due_at": "2026-08-27T22:00:00+00:00"}, ...]
+    "due_at": "2026-08-27T22:00:00+00:00"},
+   {"id": "...", "author_id": 123, "text": "Take out the trash",
+    "trigger": "arrive"}, ...]
+
+Time-based reminders have a "due_at"; location-based ones have a "trigger"
+("arrive" or "leave") instead and sit untouched until geofence_server.py
+calls pop_location_reminders() for a matching event.
 """
 
 import asyncio
@@ -15,7 +22,7 @@ import logging
 import os
 from datetime import datetime, timezone as dt_timezone
 
-from .. import config
+from .. import config, jsonstore
 from ..discord_client import client
 from . import ToolContext, register
 
@@ -57,6 +64,36 @@ SET_REMINDER_SCHEMA = {
 }
 
 
+SET_LOCATION_REMINDER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "set_location_reminder",
+        "description": (
+            "Schedule a one-off reminder that DMs the user the next time "
+            "they arrive at or leave home, instead of at a fixed time. "
+            "Only call this when the user's phrasing is location-based "
+            "('when I get home', 'next time I leave the house') rather than "
+            "time-based — use set_reminder for actual times."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "trigger": {
+                    "type": "string",
+                    "enum": ["arrive", "leave"],
+                    "description": "'arrive' fires on arriving home, 'leave' fires on leaving home.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Short description of what to remind about, e.g. 'Take out the trash'.",
+                },
+            },
+            "required": ["trigger", "text"],
+        },
+    },
+}
+
+
 def load_reminders() -> list[dict]:
     if not os.path.exists(config.REMINDERS_FILE):
         return []
@@ -69,8 +106,19 @@ def load_reminders() -> list[dict]:
 
 
 def save_reminders(reminders: list[dict]) -> None:
-    with open(config.REMINDERS_FILE, "w") as f:
-        json.dump(reminders, f, indent=2)
+    jsonstore.write(config.REMINDERS_FILE, reminders)
+
+
+def _add(reminder: dict) -> None:
+    with jsonstore.lock(config.REMINDERS_FILE):
+        reminders = load_reminders()
+        reminders.append(reminder)
+        save_reminders(reminders)
+
+
+def _remove(reminder_id: str) -> None:
+    with jsonstore.lock(config.REMINDERS_FILE):
+        save_reminders([r for r in load_reminders() if r["id"] != reminder_id])
 
 
 def parse_due_at(when_iso: str) -> datetime | None:
@@ -94,7 +142,11 @@ def schedule_reminder(reminder: dict) -> None:
     (see reschedule_pending), not to be scanned periodically."""
     due_at = datetime.fromisoformat(reminder["due_at"])
     delay = max(0, (due_at - datetime.now(dt_timezone.utc)).total_seconds())
-    asyncio.create_task(fire_after(reminder, delay))
+    # Tool handlers run in a worker thread (app.py hands ask_llm to
+    # asyncio.to_thread), so there's no running loop here to create_task on —
+    # hand the coroutine to the Discord client's loop explicitly. This is
+    # also safe when called from the loop thread itself, as on_ready does.
+    asyncio.run_coroutine_threadsafe(fire_after(reminder, delay), client.loop)
 
 
 async def fire_after(reminder: dict, delay: float) -> None:
@@ -105,18 +157,18 @@ async def fire_after(reminder: dict, delay: float) -> None:
     except Exception:
         log.exception("Failed to deliver reminder %s", reminder["id"])
     finally:
-        remaining = [r for r in load_reminders() if r["id"] != reminder["id"]]
-        save_reminders(remaining)
+        _remove(reminder["id"])
 
 
 def reschedule_pending() -> None:
     """Call once on startup to re-arm timers for reminders that were saved
     before a restart."""
     pending = load_reminders()
-    for reminder in pending:
+    timed = [r for r in pending if "due_at" in r]
+    for reminder in timed:
         schedule_reminder(reminder)
-    if pending:
-        log.info("Rescheduled %d pending reminder(s)", len(pending))
+    if timed:
+        log.info("Rescheduled %d pending reminder(s)", len(timed))
 
 
 def handle_set_reminder(arguments: dict, ctx: ToolContext) -> str:
@@ -141,12 +193,40 @@ def handle_set_reminder(arguments: dict, ctx: ToolContext) -> str:
         "text": text,
         "due_at": due_at.isoformat(),
     }
-    reminders = load_reminders()
-    reminders.append(reminder)
-    save_reminders(reminders)
+    _add(reminder)
     schedule_reminder(reminder)
 
     return f"Reminder set for {format_local(due_at)}: {text}"
 
 
+def handle_set_location_reminder(arguments: dict, ctx: ToolContext) -> str:
+    trigger = arguments.get("trigger")
+    text = arguments.get("text")
+    if trigger not in ("arrive", "leave") or not text:
+        return "Error: trigger (arrive/leave) and text are both required."
+
+    reminder = {
+        "id": os.urandom(4).hex(),
+        "author_id": ctx.message.author.id,
+        "text": text,
+        "trigger": trigger,
+    }
+    _add(reminder)
+
+    verb = "arrive home" if trigger == "arrive" else "leave home"
+    return f"Reminder set for the next time you {verb}: {text}"
+
+
+def pop_location_reminders(trigger: str) -> list[dict]:
+    """Remove and return all pending reminders waiting on this geofence
+    trigger ('arrive' or 'leave'), for delivery by geofence_server.py."""
+    with jsonstore.lock(config.REMINDERS_FILE):
+        reminders = load_reminders()
+        matched = [r for r in reminders if r.get("trigger") == trigger]
+        if matched:
+            save_reminders([r for r in reminders if r.get("trigger") != trigger])
+    return matched
+
+
 register("set_reminder", SET_REMINDER_SCHEMA, handle_set_reminder)
+register("set_location_reminder", SET_LOCATION_REMINDER_SCHEMA, handle_set_location_reminder)

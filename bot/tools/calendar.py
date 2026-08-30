@@ -13,6 +13,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .. import config, google_oauth
+from ..discord_client import client
 from . import ToolContext, register
 
 log = logging.getLogger("discord-llm-bot.tools.calendar")
@@ -131,7 +132,9 @@ def handle_connect(arguments: dict, ctx: ToolContext) -> str:
         return "The user's Google Calendar is already connected."
 
     auth_url = google_oauth.build_authorize_url(user_id)
-    asyncio.create_task(_send_connect_dm(ctx.message.author, auth_url))
+    # This handler runs in a worker thread (see reminders.schedule_reminder),
+    # so the DM has to be handed back to the Discord client's own loop.
+    asyncio.run_coroutine_threadsafe(_send_connect_dm(ctx.message.author, auth_url), client.loop)
     return (
         "Sent the user a Google Calendar connect link via DM. Tell them to "
         "check their DMs, open it, and approve access."

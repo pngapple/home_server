@@ -14,12 +14,14 @@ individual tools, config.py for settings. Run via `python -m bot` (see
 __main__.py).
 """
 
+import asyncio
 import logging
 import re
 
 import discord
 
-from . import claude_bridge, config, llm_status_server, oauth_server
+from . import claude_bridge, config, deploy, geofence_server, llm_status_server, oauth_server
+from cigboard import server as cigboard_server
 from .discord_client import client
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
@@ -63,6 +65,15 @@ async def on_ready():
         reschedule_pending()
         client.loop.create_task(oauth_server.start())
         client.loop.create_task(llm_status_server.start())
+        client.loop.create_task(cigboard_server.start())
+        client.loop.create_task(geofence_server.start())
+
+        notify_channel_id = deploy.consume_pending_notify()
+        if notify_channel_id is not None:
+            channel = client.get_channel(notify_channel_id)
+            if channel is None:
+                channel = await client.fetch_channel(notify_channel_id)
+            await channel.send("✅ Back online.")
 
 
 async def _run_claude_bridge(channel, prompt: str) -> None:
@@ -110,6 +121,25 @@ async def on_message(message: discord.Message):
 
     log.info("Message from %s (dm=%s, mention=%s): %r", message.author, is_dm, is_mention, text)
 
+    if deploy.is_trigger(text):
+        if not claude_bridge.is_authorized(message.author.id):
+            await message.channel.send("You're not authorized to deploy.")
+            return
+        force = deploy.is_force(text)
+        if not force:
+            in_flight = claude_bridge.in_flight_count()
+            if in_flight:
+                await message.channel.send(
+                    f"Refusing to restart: {in_flight} `{claude_bridge.TRIGGER_PREFIX}` "
+                    f"session(s) still running — a restart right now would kill "
+                    f"them mid-task. Wait for them to finish, or say "
+                    f"`{deploy.TRIGGER_PREFIX} {deploy.FORCE_ARG}` to restart anyway."
+                )
+                return
+        await message.channel.send("🔄 Restarting now — back in a few seconds.")
+        deploy.restart(message.channel.id)
+        return
+
     if claude_bridge.is_trigger(text):
         if not claude_bridge.is_authorized(message.author.id):
             await message.channel.send("You're not authorized to use Claude Code through this bot.")
@@ -137,7 +167,11 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            reply = ask_llm(message, text)
+            # ask_llm is synchronous and makes several blocking HTTP calls
+            # (plus tool work) that can run for a minute or more; running it
+            # inline would stall the gateway heartbeat and every other
+            # channel, reminder timer and local HTTP server in this process.
+            reply = await asyncio.to_thread(ask_llm, message, text)
         except Exception:
             log.exception("LLM call failed")
             await message.channel.send(

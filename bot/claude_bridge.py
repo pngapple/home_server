@@ -27,6 +27,15 @@ TRIGGER_PREFIX = "!code"
 # channel_id -> claude session id (uuid4 string)
 _sessions: dict[int, str] = {}
 
+# How many `claude -p` subprocesses are currently running, across all
+# channels — checked by deploy.py before restarting the bot, since a restart
+# mid-run kills the subprocess the same way an in-session self-restart would.
+_in_flight = 0
+
+
+def in_flight_count() -> int:
+    return _in_flight
+
 
 def _record_metrics(data: dict) -> None:
     """Pulls per-model token usage out of `claude -p --output-format json`
@@ -63,9 +72,14 @@ def _record_metrics(data: dict) -> None:
 # whole Pi) from inside a bridge session kills that session's own subprocess
 # mid-run before it can report back — and, worse, kills every OTHER
 # concurrently-running bridge session too, since systemd tears down the
-# whole cgroup on stop. Blocking it outright forces an explicit, separate
-# human action (a chat message asking the actual owner, or done directly by
-# this session) instead of an agent unilaterally pulling the rug out.
+# whole cgroup on stop. Denying these patterns pushes the agent toward an
+# explicit, separate human action (`!deploy`, see deploy.py) instead of
+# unilaterally pulling the rug out mid-task.
+#
+# This is a guardrail against accidents, NOT a security boundary: it's a
+# pattern blocklist, so an equivalent command spelled differently (extra
+# whitespace, `bash -c ...`, a script) still gets through. The real control
+# is that only CLAUDE_CODE_OWNER_ID can reach this code path at all.
 _SELF_RESTART_DISALLOWED_TOOLS = [
     f"Bash({prefix}systemctl {action} discord-llm-bot*)"
     for prefix in ("", "sudo ")
@@ -73,12 +87,18 @@ _SELF_RESTART_DISALLOWED_TOOLS = [
 ] + [f"Bash({prefix}{cmd}*)" for prefix in ("", "sudo ") for cmd in ("reboot", "shutdown", "poweroff", "halt")]
 
 
+def strip_trigger(text: str) -> str | None:
+    """The prompt after the trigger word, or None if `text` isn't a trigger.
+    Matches the whole first word only, so "!codebase questions" doesn't hand
+    a mangled prompt to a shell-capable agent."""
+    parts = text.strip().split(maxsplit=1)
+    if not parts or parts[0].lower() != TRIGGER_PREFIX:
+        return None
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
 def is_trigger(text: str) -> bool:
-    return text.strip().lower().startswith(TRIGGER_PREFIX)
-
-
-def strip_trigger(text: str) -> str:
-    return text.strip()[len(TRIGGER_PREFIX) :].strip()
+    return strip_trigger(text) is not None
 
 
 def is_authorized(discord_user_id: int) -> bool:
@@ -111,24 +131,29 @@ async def run(channel_id: int, prompt: str) -> str:
         session_id = str(uuid.uuid4())
         args += ["--session-id", session_id]
 
+    global _in_flight
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=config.CLAUDE_CODE_WORKDIR,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    _in_flight += 1
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=config.CLAUDE_CODE_TIMEOUT_SECONDS
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return (
-            f"Error: Claude Code didn't finish within "
-            f"{config.CLAUDE_CODE_TIMEOUT_SECONDS}s and was killed. Try a "
-            f"narrower prompt, or continue it with another `{TRIGGER_PREFIX}` message."
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=config.CLAUDE_CODE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return (
+                f"Error: Claude Code didn't finish within "
+                f"{config.CLAUDE_CODE_TIMEOUT_SECONDS}s and was killed. Try a "
+                f"narrower prompt, or continue it with another `{TRIGGER_PREFIX}` message."
+            )
+    finally:
+        _in_flight -= 1
 
     # A real on-disk session now exists for this id even if this particular
     # run errored out below, so remember it — a retry should resume, not

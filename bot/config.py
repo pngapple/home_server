@@ -15,7 +15,7 @@ OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 # Any model slug from https://openrouter.ai/models works here. Must support
 # tool calling for the reminder/tool features to work.
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
 
 # How many past turns (user+assistant pairs) to keep per channel/DM, so the
 # bot has some memory of the conversation without growing forever.
@@ -36,6 +36,9 @@ LOCAL_TZ = ZoneInfo(TIMEZONE)
 
 REMINDERS_FILE = os.environ.get("REMINDERS_FILE", "reminders.json")
 
+# Per-user cigarette counter (see tools/cigarettes.py).
+CIGARETTES_FILE = os.environ.get("CIGARETTES_FILE", "cigarettes.json")
+
 # Google Calendar OAuth (per-Discord-user linking, see tools/calendar.py).
 GOOGLE_CLIENT_SECRETS_FILE = os.environ.get("GOOGLE_CLIENT_SECRETS_FILE", "client_secret.json")
 GOOGLE_CALENDAR_TOKENS_FILE = os.environ.get("GOOGLE_CALENDAR_TOKENS_FILE", "calendar_tokens.json")
@@ -48,6 +51,10 @@ GOOGLE_OAUTH_SERVER_PORT = int(os.environ.get("GOOGLE_OAUTH_SERVER_PORT", "8788"
 # the same way the oauth callback and Netdata are — see sites-available/status.
 LLM_STATUS_SERVER_PORT = int(os.environ.get("LLM_STATUS_SERVER_PORT", "8791"))
 LLM_METRICS_FILE = os.environ.get("LLM_METRICS_FILE", "llm_metrics.json")
+
+# Cigarette leaderboard (see cigboard/), same local-only-server-behind-nginx
+# pattern as the LLM status dashboard above.
+CIGBOARD_SERVER_PORT = int(os.environ.get("CIGBOARD_SERVER_PORT", "8792"))
 
 # Kasa smart plugs (see tools/kasa.py). One shared account for the whole
 # household — nobody but the server ever needs these credentials, since
@@ -65,3 +72,12 @@ CLAUDE_CODE_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_CODE_TIMEOUT_SECONDS", 
 # Absolute path, not just "claude" — the systemd service's PATH doesn't
 # include ~/.local/bin, where the CLI actually lives.
 CLAUDE_CODE_BINARY = os.environ.get("CLAUDE_CODE_BINARY", "/home/mjxu/.local/bin/claude")
+
+# Geofence webhook (bot/geofence_server.py) — iOS Shortcuts automations hit
+# this on arrive/leave-home to deliver location-triggered reminders. Same
+# local-only-server-behind-nginx pattern as the oauth/status/cigboard servers
+# above. Secret is a shared token Shortcuts sends back, required to trigger.
+GEOFENCE_SERVER_PORT = int(os.environ.get("GEOFENCE_SERVER_PORT", "8793"))
+GEOFENCE_WEBHOOK_SECRET = os.environ.get("GEOFENCE_WEBHOOK_SECRET")
+_geofence_notify_id = os.environ.get("GEOFENCE_NOTIFY_USER_ID") or _owner_id
+GEOFENCE_NOTIFY_USER_ID = int(_geofence_notify_id) if _geofence_notify_id else None

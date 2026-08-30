@@ -6,6 +6,8 @@ from the Tailscale-only interface, same pattern as the Netdata dashboard.
 Not reachable from the LAN or the internet.
 """
 
+import asyncio
+import html
 import logging
 
 from aiohttp import web
@@ -22,7 +24,10 @@ async def handle_callback(request: web.Request) -> web.Response:
     error = request.query.get("error")
     if error:
         return web.Response(
-            text=_PAGE.format(heading="Not connected", body=f"Google reported: {error}. You can close this tab."),
+            text=_PAGE.format(
+                heading="Not connected",
+                body=f"Google reported: {html.escape(error)}. You can close this tab.",
+            ),
             content_type="text/html",
         )
 
@@ -31,7 +36,19 @@ async def handle_callback(request: web.Request) -> web.Response:
     if not code or not state:
         return web.Response(status=400, text="Missing code/state.")
 
-    discord_user_id = google_oauth.exchange_code(state, code)
+    try:
+        # exchange_code does a blocking HTTPS round trip to Google; this
+        # handler shares the Discord client's event loop, so keep it off it.
+        discord_user_id = await asyncio.to_thread(google_oauth.exchange_code, state, code)
+    except Exception:
+        log.exception("Google token exchange failed")
+        return web.Response(
+            text=_PAGE.format(
+                heading="Something went wrong",
+                body="Google wouldn't complete the link — ask the bot to connect your calendar again.",
+            ),
+            content_type="text/html",
+        )
     if discord_user_id is None:
         return web.Response(
             text=_PAGE.format(

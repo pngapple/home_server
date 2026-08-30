@@ -26,21 +26,26 @@ MAX_TOOL_ITERATIONS = 5
 # model catalog and cached for the life of the process (context windows
 # don't change at runtime, so there's no need to ever refetch).
 _context_windows: dict[str, int] = {}
+_catalog_fetched = False
 
 
 def _context_window(model: str) -> int | None:
-    if model in _context_windows:
-        return _context_windows[model]
-    try:
-        resp = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
-        resp.raise_for_status()
-        for entry in resp.json().get("data", []):
-            length = entry.get("context_length")
-            if entry.get("id") and length:
-                _context_windows[entry["id"]] = length
-    except Exception:
-        log.warning("Failed to fetch OpenRouter model catalog for context-window lookup", exc_info=True)
-        return None
+    global _catalog_fetched
+    # Only fetch once per process: a model that isn't in the catalog at all
+    # (e.g. metrics recorded under "unknown") would otherwise re-download the
+    # whole catalog on every single chat completion.
+    if not _catalog_fetched:
+        try:
+            resp = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
+            resp.raise_for_status()
+            for entry in resp.json().get("data", []):
+                length = entry.get("context_length")
+                if entry.get("id") and length:
+                    _context_windows[entry["id"]] = length
+            _catalog_fetched = True
+        except Exception:
+            log.warning("Failed to fetch OpenRouter model catalog for context-window lookup", exc_info=True)
+            return None
     return _context_windows.get(model)
 
 
@@ -126,7 +131,9 @@ def ask_llm(message, user_text: str) -> str:
         tool_calls = reply_message.get("tool_calls")
 
         if not tool_calls:
-            reply = reply_message.get("content") or ""
+            # An empty content field would otherwise make the bot silently
+            # not reply at all (app.chunk("") yields nothing).
+            reply = reply_message.get("content") or "(no reply)"
             history[channel_id].append({"role": "user", "content": user_text})
             history[channel_id].append({"role": "assistant", "content": reply})
             return reply
