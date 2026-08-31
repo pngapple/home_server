@@ -4,12 +4,10 @@ Stats computation over cigarettes.json — the same flat
 entry per logged cigarette). Pure data-in, data-out: no Discord/HTTP here.
 """
 
-import json
 import logging
-import os
 from datetime import datetime, timedelta
 
-from bot import config
+from bot import config, jsonstore
 
 log = logging.getLogger("discord-llm-bot.cigboard.leaderboard")
 
@@ -19,14 +17,7 @@ SPARKLINE_DAYS = 14
 
 
 def _load() -> dict[str, list[str]]:
-    if not os.path.exists(config.CIGARETTES_FILE):
-        return {}
-    try:
-        with open(config.CIGARETTES_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        log.exception("Failed to read %s, treating as empty", config.CIGARETTES_FILE)
-        return {}
+    return jsonstore.read(config.CIGARETTES_FILE, {})
 
 
 def _local_dates(timestamps: list[str]):

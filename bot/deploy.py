@@ -17,10 +17,11 @@ channel asked in _NOTIFY_FILE so the new process can announce itself on
 startup (see consume_pending_notify(), called from app.py's on_ready).
 """
 
-import json
 import logging
 import os
 import subprocess
+
+from . import config, jsonstore
 
 log = logging.getLogger("discord-llm-bot.deploy")
 
@@ -55,8 +56,7 @@ def restart(channel_id: int) -> None:
     this, since there's no chance to reply after: this process is about to
     die."""
     try:
-        with open(_NOTIFY_FILE, "w") as f:
-            json.dump({"channel_id": channel_id}, f)
+        jsonstore.write(_NOTIFY_FILE, {"channel_id": channel_id})
     except OSError:
         # The caller has already promised a restart, so go through with it —
         # the only cost of losing this file is no "back online" message.
@@ -64,23 +64,15 @@ def restart(channel_id: int) -> None:
     # Fire-and-forget: `sudo systemctl restart` tears down this whole
     # process (and this coroutine with it) almost immediately, so there's no
     # meaningful result to await here.
-    subprocess.Popen(["sudo", "systemctl", "restart", "discord-llm-bot"])
+    subprocess.Popen(["sudo", "systemctl", "restart", config.SERVICE_NAME])
 
 
 def consume_pending_notify() -> int | None:
     """Called once from on_ready. Returns the channel id to announce
     "back online" in, if this startup was the result of a !deploy restart."""
-    if not os.path.exists(_NOTIFY_FILE):
-        return None
+    data = jsonstore.read(_NOTIFY_FILE, {})
     try:
-        with open(_NOTIFY_FILE, "r") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        log.exception("Failed to read %s", _NOTIFY_FILE)
-        data = {}
-    finally:
-        try:
-            os.remove(_NOTIFY_FILE)
-        except OSError:
-            pass
+        os.remove(_NOTIFY_FILE)
+    except OSError:
+        pass
     return data.get("channel_id")

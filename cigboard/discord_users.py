@@ -15,7 +15,7 @@ import time
 
 import aiohttp
 
-from bot import config
+from bot import config, httpclient
 
 log = logging.getLogger("discord-llm-bot.cigboard.discord_users")
 
@@ -76,10 +76,12 @@ async def _fetch_one(session: aiohttp.ClientSession, user_id: str) -> tuple[dict
 async def resolve_many(user_ids: list[str]) -> dict[str, dict]:
     """Returns {user_id: {id, display_name, avatar_url}}, using and refreshing the cache."""
     now = time.monotonic()
-    stale = [uid for uid in user_ids if now >= _cache.get(uid, (0.0, None))[0]]
+    # dict.fromkeys, not a set: dedupes while keeping a stable order, so a
+    # repeated id in `user_ids` is only fetched once.
+    stale = list(dict.fromkeys(uid for uid in user_ids if now >= _cache.get(uid, (0.0, None))[0]))
     if stale:
-        async with aiohttp.ClientSession() as session:
-            results = await asyncio.gather(*(_fetch_one(session, uid) for uid in stale))
+        session = httpclient.session()
+        results = await asyncio.gather(*(_fetch_one(session, uid) for uid in stale))
         for uid, (profile, ok) in zip(stale, results):
             _cache[uid] = (now + (_OK_TTL_S if ok else _FAIL_TTL_S), profile)
     return {uid: _cache[uid][1] for uid in user_ids}

@@ -10,7 +10,7 @@ import logging
 
 from aiohttp import web
 
-from bot import config
+from bot import config, webserver
 
 from . import discord_users, leaderboard
 
@@ -315,11 +315,8 @@ async def handle_leaderboard(request: web.Request) -> web.Response:
 
 
 async def start() -> None:
-    app = web.Application()
-    app.router.add_get("/", handle_index)
-    app.router.add_get("/api/leaderboard", handle_leaderboard)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", config.CIGBOARD_SERVER_PORT)
-    await site.start()
-    log.info("Cigboard server listening on 127.0.0.1:%d", config.CIGBOARD_SERVER_PORT)
+    await webserver.serve(
+        "Cigboard server",
+        config.CIGBOARD_SERVER_PORT,
+        [web.get("/", handle_index), web.get("/api/leaderboard", handle_leaderboard)],
+    )

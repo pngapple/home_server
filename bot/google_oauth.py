@@ -12,11 +12,11 @@ handful of personal links, not a workload.
 
 import json
 import logging
-import os
 import secrets
 import threading
 import time
 
+from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -27,7 +27,7 @@ log = logging.getLogger("discord-llm-bot.google_oauth")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
-# state -> (discord_user_id, code_verifier, created_at). Short-lived,
+# state -> (discord_user_id, code_verifier, created_at monotonic). Short-lived,
 # in-memory only: if the bot restarts mid-flow the user just asks to connect
 # again. code_verifier must be carried from the authorize step to the
 # exchange step (PKCE) since each uses its own Flow instance.
@@ -59,13 +59,13 @@ def build_authorize_url(discord_user_id: int) -> str:
     # code below, since that's a separate object.
     with _PENDING_LOCK:
         _prune_expired_states()
-        _PENDING_STATES[state] = (discord_user_id, flow.code_verifier, time.time())
+        _PENDING_STATES[state] = (discord_user_id, flow.code_verifier, time.monotonic())
     return auth_url
 
 
 def _prune_expired_states() -> None:
     """Caller must hold _PENDING_LOCK."""
-    now = time.time()
+    now = time.monotonic()
     expired = [s for s, (_, _, created) in _PENDING_STATES.items() if now - created > _STATE_TTL_SECONDS]
     for s in expired:
         del _PENDING_STATES[s]
@@ -90,39 +90,45 @@ def exchange_code(state: str, code: str) -> int | None:
 
 
 def _load_all() -> dict:
-    if not os.path.exists(config.GOOGLE_CALENDAR_TOKENS_FILE):
-        return {}
-    try:
-        with open(config.GOOGLE_CALENDAR_TOKENS_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        log.exception("Failed to read %s, treating as empty", config.GOOGLE_CALENDAR_TOKENS_FILE)
-        return {}
+    return jsonstore.read(config.GOOGLE_CALENDAR_TOKENS_FILE, {})
 
 
-def _save_all(data: dict) -> None:
-    # These are live Google refresh tokens: create the file 0600 up front
-    # rather than writing at the default umask and chmod-ing after, which
-    # leaves a window where anyone on the box can read it.
-    jsonstore.write(config.GOOGLE_CALENDAR_TOKENS_FILE, data, mode=0o600)
+# These are live Google refresh tokens: create the file 0600 up front rather
+# than writing at the default umask and chmod-ing after, which leaves a
+# window where anyone on the box can read it.
+def _tokens():
+    """Read-modify-write context manager over the token file."""
+    return jsonstore.update(config.GOOGLE_CALENDAR_TOKENS_FILE, {}, mode=0o600)
 
 
 def _save_credentials(discord_user_id: int, creds: Credentials) -> None:
-    with jsonstore.lock(config.GOOGLE_CALENDAR_TOKENS_FILE):
-        all_tokens = _load_all()
+    with _tokens() as all_tokens:
         all_tokens[str(discord_user_id)] = json.loads(creds.to_json())
-        _save_all(all_tokens)
+
+
+def _forget(discord_user_id: int) -> None:
+    with _tokens() as all_tokens:
+        all_tokens.pop(str(discord_user_id), None)
 
 
 def get_credentials(discord_user_id: int) -> Credentials | None:
-    all_tokens = _load_all()
-    raw = all_tokens.get(str(discord_user_id))
+    """Usable credentials for this user, or None if they never linked an
+    account or their grant no longer works (revoked in Google's account
+    settings, refresh token expired). A dead grant is dropped so the caller's
+    "not connected, send them a link" path takes over instead of the same
+    doomed refresh being retried on every message."""
+    raw = _load_all().get(str(discord_user_id))
     if raw is None:
         return None
 
     creds = Credentials.from_authorized_user_info(raw, SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except GoogleAuthError:
+            log.warning("Dropping unusable Google credentials for user %s", discord_user_id, exc_info=True)
+            _forget(discord_user_id)
+            return None
         _save_credentials(discord_user_id, creds)
     return creds
 

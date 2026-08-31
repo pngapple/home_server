@@ -10,8 +10,30 @@ from dotenv import load_dotenv
 load_dotenv()  # reads .env in this directory when run manually (not needed
                # under systemd if you use EnvironmentFile=, but harmless either way)
 
-DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
-OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _required(name: str) -> str:
+    """A must-have setting. Fails at import with a message that says what to
+    do, rather than a bare KeyError traceback out of systemd."""
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} is not set — add it to .env (see SETUP_GUIDE.md) and restart the service.")
+    return value
+
+
+def _flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    return default if raw is None else raw.strip().lower() in _TRUTHY
+
+
+def _optional_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    return int(raw) if raw else None
+
+
+DISCORD_BOT_TOKEN = _required("DISCORD_BOT_TOKEN")
+OPENROUTER_API_KEY = _required("OPENROUTER_API_KEY")
 
 # Any model slug from https://openrouter.ai/models works here. Must support
 # tool calling for the reminder/tool features to work.
@@ -28,6 +50,11 @@ SYSTEM_PROMPT = os.environ.get(
 )
 
 DISCORD_MESSAGE_LIMIT = 2000  # Discord's hard cap per message
+
+# The systemd unit this process runs as. Used by deploy.py to restart it and
+# by claude_bridge.py to deny a bridge session from restarting it — one
+# constant so those two can't drift apart (see discord-llm-bot.service).
+SERVICE_NAME = os.environ.get("SERVICE_NAME", "discord-llm-bot")
 
 # Timezone used to interpret "tonight", "tomorrow at 3pm", etc. Must be an
 # IANA name (see `timedatectl list-timezones`).
@@ -61,12 +88,15 @@ CIGBOARD_SERVER_PORT = int(os.environ.get("CIGBOARD_SERVER_PORT", "8792"))
 # control happens through the bot, not the Kasa app.
 KASA_USERNAME = os.environ.get("KASA_USERNAME")
 KASA_PASSWORD = os.environ.get("KASA_PASSWORD")
+# These tools switch real power. Off by default (anyone who can reach the
+# bot can drive them, as has always been the case); set to 1 to restrict
+# them to CLAUDE_CODE_OWNER_ID via the registry's owner_only gate.
+KASA_OWNER_ONLY = _flag("KASA_OWNER_ONLY")
 
 # Direct bridge to a real headless Claude Code session (bot/claude_bridge.py)
 # — full shell/file access on this server, so restricted to a single owner
 # Discord user id. Unset (None) means the bridge is disabled for everyone.
-_owner_id = os.environ.get("CLAUDE_CODE_OWNER_ID")
-CLAUDE_CODE_OWNER_ID = int(_owner_id) if _owner_id else None
+CLAUDE_CODE_OWNER_ID = _optional_int("CLAUDE_CODE_OWNER_ID")
 CLAUDE_CODE_WORKDIR = os.environ.get("CLAUDE_CODE_WORKDIR", "/home/mjxu/home_server")
 CLAUDE_CODE_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_CODE_TIMEOUT_SECONDS", "600"))
 # Absolute path, not just "claude" — the systemd service's PATH doesn't
@@ -79,5 +109,4 @@ CLAUDE_CODE_BINARY = os.environ.get("CLAUDE_CODE_BINARY", "/home/mjxu/.local/bin
 # above. Secret is a shared token Shortcuts sends back, required to trigger.
 GEOFENCE_SERVER_PORT = int(os.environ.get("GEOFENCE_SERVER_PORT", "8793"))
 GEOFENCE_WEBHOOK_SECRET = os.environ.get("GEOFENCE_WEBHOOK_SECRET")
-_geofence_notify_id = os.environ.get("GEOFENCE_NOTIFY_USER_ID") or _owner_id
-GEOFENCE_NOTIFY_USER_ID = int(_geofence_notify_id) if _geofence_notify_id else None
+GEOFENCE_NOTIFY_USER_ID = _optional_int("GEOFENCE_NOTIFY_USER_ID") or CLAUDE_CODE_OWNER_ID

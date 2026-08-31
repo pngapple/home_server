@@ -9,12 +9,17 @@ see _load()/_save() below. Uptime deliberately does NOT persist: it's meant
 to show time since this process last started, which is useful signal in
 itself (a suspiciously low uptime means the bot crashed/restarted
 recently) — carrying it over would hide that.
+
+Every recording path goes through record_many(), which takes the file lock
+once and writes once: a single Claude Code turn can report several models
+plus a cost, and that shouldn't mean several full rewrites of the file.
+record_many() blocks on disk, so async callers should hand it to a thread.
 """
 
-import json
 import logging
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 
 from . import config, jsonstore
@@ -23,6 +28,8 @@ log = logging.getLogger("discord-llm-bot.metrics")
 
 _START_TIME = time.monotonic()
 _MAX_RECENT = 200
+# How many of _recent the dashboard shows; also the chart's bar count.
+_SNAPSHOT_ROWS = 25
 
 
 @dataclass
@@ -39,6 +46,21 @@ class Call:
     def tokens_per_sec(self) -> float:
         return self.output_tokens / self.duration_s if self.duration_s > 0 else 0.0
 
+    def as_dict(self) -> dict:
+        """The dashboard-facing shape: stored fields plus the derived ones,
+        rounded for display."""
+        return {
+            "source": self.source,
+            "model": self.model,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.input_tokens + self.output_tokens,
+            "duration_s": round(self.duration_s, 2),
+            "tokens_per_sec": round(self.tokens_per_sec, 1),
+            "context_window": self.context_window,
+            "timestamp": self.timestamp,
+        }
+
 
 _recent: deque[Call] = deque(maxlen=_MAX_RECENT)
 
@@ -51,31 +73,25 @@ _claude_code_cost_usd = 0.0
 
 def _load() -> None:
     global _claude_code_cost_usd
-    try:
-        with open(config.LLM_METRICS_FILE, "r") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return
-    except (json.JSONDecodeError, OSError):
-        log.exception("Failed to read %s, starting with empty metrics", config.LLM_METRICS_FILE)
-        return
-    for c in data.get("recent", []):
+    data = jsonstore.read(config.LLM_METRICS_FILE, {})
+    for entry in data.get("recent", []):
         # This module is imported at startup, so one malformed/outdated entry
         # must not take the whole bot down with it.
         try:
-            _recent.append(Call(**c))
+            _recent.append(Call(**entry))
         except TypeError:
-            log.warning("Skipping unreadable metrics entry: %r", c)
+            log.warning("Skipping unreadable metrics entry: %r", entry)
     _claude_code_cost_usd = data.get("claude_code_cost_usd", 0.0)
 
 
 def _save() -> None:
-    data = {
-        "recent": [asdict(c) for c in _recent],
-        "claude_code_cost_usd": _claude_code_cost_usd,
-    }
+    """Caller must hold the metrics file lock."""
     try:
-        jsonstore.write(config.LLM_METRICS_FILE, data, indent=None)
+        jsonstore.write(
+            config.LLM_METRICS_FILE,
+            {"recent": [asdict(c) for c in _recent], "claude_code_cost_usd": _claude_code_cost_usd},
+            indent=None,
+        )
     except OSError:
         log.exception("Failed to write %s", config.LLM_METRICS_FILE)
 
@@ -83,9 +99,11 @@ def _save() -> None:
 _load()
 
 
-def add_claude_code_cost(cost_usd: float) -> None:
+def record_many(calls: Iterable[Call] = (), cost_usd: float = 0.0) -> None:
+    """Append calls and/or add to cumulative Claude Code spend, in one write."""
     global _claude_code_cost_usd
     with jsonstore.lock(config.LLM_METRICS_FILE):
+        _recent.extend(calls)
         _claude_code_cost_usd += cost_usd
         _save()
 
@@ -98,9 +116,7 @@ def record(
     duration_s: float,
     context_window: int | None = None,
 ) -> None:
-    with jsonstore.lock(config.LLM_METRICS_FILE):
-        _recent.append(Call(source, model, input_tokens, output_tokens, duration_s, context_window))
-        _save()
+    record_many([Call(source, model, input_tokens, output_tokens, duration_s, context_window)])
 
 
 def snapshot() -> dict:
@@ -108,6 +124,7 @@ def snapshot() -> dict:
     with jsonstore.lock(config.LLM_METRICS_FILE):
         calls = list(_recent)
         claude_code_cost = _claude_code_cost_usd
+
     total_input = sum(c.input_tokens for c in calls)
     total_output = sum(c.output_tokens for c in calls)
 
@@ -117,21 +134,6 @@ def snapshot() -> dict:
     rated = [c for c in calls if c.duration_s > 0 and c.output_tokens > 0]
     avg_tps = sum(c.tokens_per_sec for c in rated) / len(rated) if rated else 0.0
 
-    last = calls[-1] if calls else None
-
-    def call_dict(c: Call) -> dict:
-        return {
-            "source": c.source,
-            "model": c.model,
-            "input_tokens": c.input_tokens,
-            "output_tokens": c.output_tokens,
-            "total_tokens": c.input_tokens + c.output_tokens,
-            "duration_s": round(c.duration_s, 2),
-            "tokens_per_sec": round(c.tokens_per_sec, 1),
-            "context_window": c.context_window,
-            "timestamp": c.timestamp,
-        }
-
     return {
         "uptime_s": round(time.monotonic() - _START_TIME, 1),
         "total_calls": len(calls),
@@ -139,7 +141,7 @@ def snapshot() -> dict:
         "total_output_tokens": total_output,
         "total_tokens": total_input + total_output,
         "avg_tokens_per_sec": round(avg_tps, 1),
-        "last": call_dict(last) if last else None,
-        "recent": [call_dict(c) for c in reversed(calls[-25:])],
+        "last": calls[-1].as_dict() if calls else None,
+        "recent": [c.as_dict() for c in reversed(calls[-_SNAPSHOT_ROWS:])],
         "claude_code_cost_usd": round(claude_code_cost, 4),
     }

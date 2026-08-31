@@ -15,7 +15,7 @@ import logging
 
 from aiohttp import web
 
-from . import config
+from . import config, webserver
 from .discord_client import client
 from .tools.reminders import pop_location_reminders
 
@@ -68,14 +68,14 @@ async def handle_webhook(request: web.Request) -> web.Response:
 
 
 async def start() -> None:
-    app = web.Application()
-    app.router.add_post("/geofence/webhook", handle_webhook)
-    # Shortcuts defaults to GET unless changed. Note a GET puts the shared
-    # secret in the query string, where nginx logs it in plain text — prefer
-    # configuring the Shortcut to POST a form body.
-    app.router.add_get("/geofence/webhook", handle_webhook)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", config.GEOFENCE_SERVER_PORT)
-    await site.start()
-    log.info("Geofence webhook server listening on 127.0.0.1:%d", config.GEOFENCE_SERVER_PORT)
+    await webserver.serve(
+        "Geofence webhook server",
+        config.GEOFENCE_SERVER_PORT,
+        [
+            web.post("/geofence/webhook", handle_webhook),
+            # Shortcuts defaults to GET unless changed. Note a GET puts the
+            # shared secret in the query string, where nginx logs it in plain
+            # text — prefer configuring the Shortcut to POST a form body.
+            web.get("/geofence/webhook", handle_webhook),
+        ],
+    )
