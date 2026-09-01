@@ -7,6 +7,8 @@ calendar_tokens.json
 llm_metrics.json
 deploy_notify.json
 cigarettes.json
+todos.json
+groceries.json
 
 # transient files from jsonstore.write()
 *.json.tmp

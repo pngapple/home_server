@@ -66,6 +66,12 @@ REMINDERS_FILE = os.environ.get("REMINDERS_FILE", "reminders.json")
 # Per-user cigarette counter (see tools/cigarettes.py).
 CIGARETTES_FILE = os.environ.get("CIGARETTES_FILE", "cigarettes.json")
 
+# Per-user todo list (see tools/todos.py).
+TODOS_FILE = os.environ.get("TODOS_FILE", "todos.json")
+
+# Personal + shared grocery lists (see tools/groceries.py).
+GROCERIES_FILE = os.environ.get("GROCERIES_FILE", "groceries.json")
+
 # Google Calendar OAuth (per-Discord-user linking, see tools/calendar.py).
 GOOGLE_CLIENT_SECRETS_FILE = os.environ.get("GOOGLE_CLIENT_SECRETS_FILE", "client_secret.json")
 GOOGLE_CALENDAR_TOKENS_FILE = os.environ.get("GOOGLE_CALENDAR_TOKENS_FILE", "calendar_tokens.json")
