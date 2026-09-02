@@ -34,6 +34,10 @@ from . import ToolContext, tool
 
 log = logging.getLogger("discord-llm-bot.tools.groceries")
 
+# A household tool — gated to config.HOUSEHOLD_ROLE_NAME (see permissions.py)
+# so randoms in the server/DMs can't touch it.
+_HOUSEHOLD = config.HOUSEHOLD_ROLE_NAME
+
 SCOPES = ("personal", "shared")
 DEFAULT_SCOPE = "personal"
 
@@ -159,6 +163,7 @@ def _card(scope: str, open_items: list[dict], done_items: list[dict]) -> str:
         },
     },
     required=["text"],
+    required_role=_HOUSEHOLD,
 )
 def handle_add_grocery_item(arguments: dict, ctx: ToolContext) -> str:
     text = arguments["text"].strip()
@@ -202,6 +207,7 @@ def handle_add_grocery_item(arguments: dict, ctx: ToolContext) -> str:
             ),
         },
     },
+    required_role=_HOUSEHOLD,
 )
 def handle_list_groceries(arguments: dict, ctx: ToolContext) -> str:
     scope = _normalize_scope(arguments.get("scope"))
@@ -240,6 +246,7 @@ def handle_list_groceries(arguments: dict, ctx: ToolContext) -> str:
         },
     },
     required=["identifier"],
+    required_role=_HOUSEHOLD,
 )
 def handle_check_off_grocery_item(arguments: dict, ctx: ToolContext) -> str:
     identifier = arguments["identifier"]

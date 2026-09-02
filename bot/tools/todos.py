@@ -10,6 +10,11 @@ deliberately-not-a-database pattern as tools/cigarettes.py:
 
 Completed items are kept (done=true) rather than deleted, so list_todos can
 still show "recently completed" for a bit of context — see _prune_done.
+
+Unlike the other household tools in this package (calendar, reminders,
+groceries), todos aren't role-gated — each user's list is keyed by their own
+Discord id, so there's nothing shared to protect and no reason to keep
+non-household members out.
 """
 
 import logging
@@ -111,8 +116,13 @@ def handle_add_todo(arguments: dict, ctx: ToolContext) -> str:
             }
         )
         open_count = sum(1 for item in items if not item.get("done"))
+        card = _card([i for i in items if not i.get("done")], [i for i in items if i.get("done")])
 
-    return f"Added '{text}' to your todo list ({open_count} open item{'s' if open_count != 1 else ''})."
+    return (
+        f"Added '{text}' to your todo list ({open_count} open item{'s' if open_count != 1 else ''}).\n\n"
+        "(Relay the card below to the user verbatim, unchanged, including "
+        "the code block — don't rewrite, reformat, or summarize it.)\n\n" + card
+    )
 
 
 @tool(
@@ -168,5 +178,10 @@ def handle_complete_todo(arguments: dict, ctx: ToolContext) -> str:
         item = matches[0]
         item["done"] = True
         item["completed_at"] = datetime.now(UTC).isoformat()
+        card = _card([i for i in items if not i.get("done")], [i for i in items if i.get("done")])
 
-    return f"Checked off '{item['text']}'."
+    return (
+        f"Checked off '{item['text']}'.\n\n"
+        "(Relay the card below to the user verbatim, unchanged, including "
+        "the code block — don't rewrite, reformat, or summarize it.)\n\n" + card
+    )

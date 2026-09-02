@@ -1,9 +1,10 @@
 """
 Direct bridge from Discord messages to a real headless Claude Code session
 (`claude -p`) — not the small OpenRouter chat model used elsewhere in this
-bot. This gets real shell/file access on the server, so it's gated to a
-single owner Discord user id (config.CLAUDE_CODE_OWNER_ID) and triggered
-only by an explicit prefix, never by ordinary conversation.
+bot. This gets real shell/file access on the server, so it's gated to
+admins (config.CLAUDE_CODE_OWNER_ID or the Administrator Discord role — see
+permissions.is_admin) and triggered only by an explicit prefix, never by
+ordinary conversation.
 
 Each Discord channel/DM gets its own Claude Code session id, so follow-up
 messages continue the same conversation (`claude --resume`) instead of
@@ -18,7 +19,7 @@ import json
 import logging
 import uuid
 
-from . import config, metrics
+from . import config, metrics, permissions
 from .metrics import Call
 
 log = logging.getLogger("discord-llm-bot.claude_bridge")
@@ -48,12 +49,14 @@ def _channel_lock(channel_id: int) -> asyncio.Lock:
     return _channel_locks.setdefault(channel_id, asyncio.Lock())
 
 
-def _calls_from(data: dict) -> list[Call]:
+def _calls_from(data: dict, user_id: int | None, user_name: str | None) -> list[Call]:
     """Per-model token usage out of `claude -p --output-format json` output.
     modelUsage is keyed by the raw model id and has one entry per model
     actually used in the turn (usually one, but a fallback/retry can involve
     more than one) — duration_ms covers the whole call, so a multi-model turn
-    gets an approximate per-model rate rather than an exact one."""
+    gets an approximate per-model rate rather than an exact one. `user_id`/
+    `user_name` attribute every Call to whoever sent the triggering message —
+    see llm_status_server.py's per-user table."""
     duration_s = (data.get("duration_ms") or 0) / 1000
     model_usage = data.get("modelUsage") or {}
     if not model_usage:
@@ -65,6 +68,8 @@ def _calls_from(data: dict) -> list[Call]:
                 input_tokens=usage.get("input_tokens", 0),
                 output_tokens=usage.get("output_tokens", 0),
                 duration_s=duration_s,
+                user_id=user_id,
+                user_name=user_name,
             )
         ]
     return [
@@ -75,15 +80,23 @@ def _calls_from(data: dict) -> list[Call]:
             output_tokens=usage.get("outputTokens", 0),
             duration_s=duration_s,
             context_window=usage.get("contextWindow"),
+            user_id=user_id,
+            user_name=user_name,
         )
         for model_id, usage in model_usage.items()
     ]
 
 
-async def _record_metrics(data: dict) -> None:
+async def _record_metrics(data: dict, user_id: int | None, user_name: str | None) -> None:
     """One locked file write for the whole turn, off the event loop —
     metrics writes hit the disk, and this runs on the Discord client's loop."""
-    await asyncio.to_thread(metrics.record_many, _calls_from(data), data.get("total_cost_usd") or 0.0)
+    await asyncio.to_thread(
+        metrics.record_many,
+        _calls_from(data, user_id, user_name),
+        data.get("total_cost_usd") or 0.0,
+        user_id,
+        "claude-code",
+    )
 
 
 # Restarting/stopping/killing this bot's own systemd unit (or rebooting the
@@ -97,7 +110,7 @@ async def _record_metrics(data: dict) -> None:
 # This is a guardrail against accidents, NOT a security boundary: it's a
 # pattern blocklist, so an equivalent command spelled differently (extra
 # whitespace, `bash -c ...`, a script) still gets through. The real control
-# is that only CLAUDE_CODE_OWNER_ID can reach this code path at all.
+# is that only admins (is_authorized()) can reach this code path at all.
 _SELF_RESTART_DISALLOWED_TOOLS = [
     f"Bash({prefix}systemctl {action} {config.SERVICE_NAME}*)"
     for prefix in ("", "sudo ")
@@ -119,8 +132,8 @@ def is_trigger(text: str) -> bool:
     return strip_trigger(text) is not None
 
 
-def is_authorized(discord_user_id: int) -> bool:
-    return config.CLAUDE_CODE_OWNER_ID is not None and discord_user_id == config.CLAUDE_CODE_OWNER_ID
+def is_authorized(discord_user_id: int, roles: frozenset[str] = frozenset()) -> bool:
+    return permissions.is_admin(discord_user_id, roles)
 
 
 def has_session(channel_id: int) -> bool:
@@ -130,12 +143,15 @@ def has_session(channel_id: int) -> bool:
     return channel_id in _sessions
 
 
-async def run(channel_id: int, prompt: str) -> str:
+async def run(channel_id: int, prompt: str, user_id: int | None = None, user_name: str | None = None) -> str:
     """Run one prompt in this channel's Claude Code session and return the
     final text. Serialized per channel: a second message arriving mid-run
-    waits its turn rather than racing the same session id."""
+    waits its turn rather than racing the same session id. `user_id`/
+    `user_name` are just for metrics attribution (see _record_metrics) —
+    this stays a single-owner bridge (see is_authorized) regardless of who
+    they say sent it."""
     async with _channel_lock(channel_id):
-        return await _run_locked(channel_id, prompt)
+        return await _run_locked(channel_id, prompt, user_id, user_name)
 
 
 def _build_args(prompt: str, session_id: str, resume: bool) -> list[str]:
@@ -153,7 +169,7 @@ def _build_args(prompt: str, session_id: str, resume: bool) -> list[str]:
     ]
 
 
-async def _run_locked(channel_id: int, prompt: str) -> str:
+async def _run_locked(channel_id: int, prompt: str, user_id: int | None, user_name: str | None) -> str:
     global _in_flight
 
     session_id = _sessions.get(channel_id)
@@ -215,5 +231,5 @@ async def _run_locked(channel_id: int, prompt: str) -> str:
         log.warning("claude -p --output-format json returned non-JSON stdout: %r", raw[:500])
         return raw or "(no output)"
 
-    await _record_metrics(data)
+    await _record_metrics(data, user_id, user_name)
     return data.get("result") or "(no output)"

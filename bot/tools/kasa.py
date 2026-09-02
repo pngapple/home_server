@@ -33,12 +33,15 @@ from . import ToolContext, tool
 log = logging.getLogger("discord-llm-bot.tools.kasa")
 
 # NOTE: these tools perform physical actions (cutting power to whatever is
-# plugged in). Who may actuate hardware is a policy call, so it's a config
-# switch rather than a silent assumption: set KASA_OWNER_ONLY=1 to restrict
-# them to CLAUDE_CODE_OWNER_ID. Left off by default, which is the behaviour
-# this has always had — anyone who can DM the bot or @mention it in a shared
-# server can drive these through the model.
+# plugged in). They're always gated to config.HOUSEHOLD_ROLE_NAME (see
+# permissions.py) so randoms in the server/DMs can't touch them — same as
+# the other household tools (calendar, groceries, reminders). On top of
+# that, set KASA_OWNER_ONLY=1 to further restrict them to admins
+# (CLAUDE_CODE_OWNER_ID or the ADMIN_ROLE_NAME role — see
+# permissions.is_admin), e.g. if even some residents shouldn't cut power to
+# shared equipment.
 _OWNER_ONLY = config.KASA_OWNER_ONLY
+_HOUSEHOLD = config.HOUSEHOLD_ROLE_NAME
 
 _DISCOVERY_TIMEOUT_S = 3
 _CACHE_TTL_SECONDS = 120
@@ -161,6 +164,7 @@ async def _get_status(host: str) -> bool:
         "user means."
     ),
     owner_only=_OWNER_ONLY,
+    required_role=_HOUSEHOLD,
 )
 def handle_list(arguments: dict, ctx: ToolContext) -> str:
     if error := _credentials_missing():
@@ -187,6 +191,7 @@ def handle_list(arguments: dict, ctx: ToolContext) -> str:
     },
     required=["device", "state"],
     owner_only=_OWNER_ONLY,
+    required_role=_HOUSEHOLD,
 )
 def handle_set_power(arguments: dict, ctx: ToolContext) -> str:
     if error := _credentials_missing():
@@ -214,6 +219,7 @@ def handle_set_power(arguments: dict, ctx: ToolContext) -> str:
     properties={"device": {"type": "string", "description": "The plug's name/alias."}},
     required=["device"],
     owner_only=_OWNER_ONLY,
+    required_role=_HOUSEHOLD,
 )
 def handle_get_status(arguments: dict, ctx: ToolContext) -> str:
     if error := _credentials_missing():

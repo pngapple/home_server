@@ -208,6 +208,11 @@ _PAGE = """<!doctype html>
   </div>
 
   <div class="panel">
+    <h2>Per-user usage</h2>
+    <div id="user-table-wrap"></div>
+  </div>
+
+  <div class="panel">
     <h2>Recent calls</h2>
     <div id="table-wrap"></div>
   </div>
@@ -226,6 +231,11 @@ function fmtUptime(s) {
 }
 function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString();
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
 }
 function renderChart(recent) {
   const wrap = document.getElementById('chart-wrap');
@@ -287,6 +297,27 @@ function render(data) {
   document.getElementById('t-cc-cost').textContent = '$' + (data.claude_code_cost_usd || 0).toFixed(3);
 
   renderChart(data.recent);
+
+  const uwrap = document.getElementById('user-table-wrap');
+  if (!data.by_user || !data.by_user.length) {
+    uwrap.innerHTML = '<p class="empty">No requests yet since the bot started.</p>';
+  } else {
+    let urows = data.by_user.map(u => `
+      <tr>
+        <td>${escapeHtml(u.user_name)}</td>
+        <td class="num">${u.calls.toLocaleString()}</td>
+        <td class="num">${fmtCompact(u.total_tokens)}</td>
+        <td class="num">${u.openrouter_cost_usd ? '$' + u.openrouter_cost_usd.toFixed(3) : '–'}</td>
+        <td class="num">${u.claude_code_cost_usd ? '$' + u.claude_code_cost_usd.toFixed(3) : '–'}</td>
+      </tr>`).join('');
+    uwrap.innerHTML = `<table>
+      <thead><tr>
+        <th>User</th><th class="num">Requests</th><th class="num">Tokens</th>
+        <th class="num">OpenRouter cost</th><th class="num">Claude Code spend</th>
+      </tr></thead>
+      <tbody>${urows}</tbody>
+    </table>`;
+  }
 
   const wrap = document.getElementById('table-wrap');
   if (!data.recent.length) {

@@ -39,6 +39,17 @@ OPENROUTER_API_KEY = _required("OPENROUTER_API_KEY")
 # tool calling for the reminder/tool features to work.
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
 
+# When set, only routes requests to providers with a Zero Data Retention
+# policy (https://openrouter.ai/docs/guides/features/zdr).
+OPENROUTER_ZDR = os.environ.get("OPENROUTER_ZDR", "").lower() in ("1", "true", "yes")
+
+# Cap on completion length per request. Required, not just a nicety: some
+# providers (e.g. GMICloud, which serves qwen3-235b) default an unset
+# max_tokens to the model's *entire* context window as the completion
+# budget rather than clamping it to what's left after the input, so even a
+# one-word prompt overflows the context length and every call 400s.
+OPENROUTER_MAX_TOKENS = int(os.environ.get("OPENROUTER_MAX_TOKENS", "2048"))
+
 # How many past turns (user+assistant pairs) to keep per channel/DM, so the
 # bot has some memory of the conversation without growing forever.
 HISTORY_TURNS = int(os.environ.get("HISTORY_TURNS", "6"))
@@ -94,20 +105,40 @@ CIGBOARD_SERVER_PORT = int(os.environ.get("CIGBOARD_SERVER_PORT", "8792"))
 # control happens through the bot, not the Kasa app.
 KASA_USERNAME = os.environ.get("KASA_USERNAME")
 KASA_PASSWORD = os.environ.get("KASA_PASSWORD")
-# These tools switch real power. Off by default (anyone who can reach the
-# bot can drive them, as has always been the case); set to 1 to restrict
-# them to CLAUDE_CODE_OWNER_ID via the registry's owner_only gate.
+# These tools switch real power, so they're always restricted to the
+# HOUSEHOLD_ROLE_NAME role below (see tools/kasa.py). Set this to 1 to
+# further restrict them to admins only (CLAUDE_CODE_OWNER_ID or the
+# ADMIN_ROLE_NAME role below) via the registry's owner_only gate — e.g. if
+# even some residents shouldn't cut power to shared equipment.
 KASA_OWNER_ONLY = _flag("KASA_OWNER_ONLY")
 
 # Direct bridge to a real headless Claude Code session (bot/claude_bridge.py)
-# — full shell/file access on this server, so restricted to a single owner
-# Discord user id. Unset (None) means the bridge is disabled for everyone.
+# — full shell/file access on this server, so restricted to admins
+# (CLAUDE_CODE_OWNER_ID or the ADMIN_ROLE_NAME role below). Unset (None)
+# means CLAUDE_CODE_OWNER_ID itself grants no access — the role can still
+# grant it, and needs at least one guild member to actually be usable.
 CLAUDE_CODE_OWNER_ID = _optional_int("CLAUDE_CODE_OWNER_ID")
 CLAUDE_CODE_WORKDIR = os.environ.get("CLAUDE_CODE_WORKDIR", "/home/mjxu/home_server")
 CLAUDE_CODE_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_CODE_TIMEOUT_SECONDS", "600"))
 # Absolute path, not just "claude" — the systemd service's PATH doesn't
 # include ~/.local/bin, where the CLI actually lives.
 CLAUDE_CODE_BINARY = os.environ.get("CLAUDE_CODE_BINARY", "/home/mjxu/.local/bin/claude")
+
+# Discord role-based permissions (bot/permissions.py). Create these roles in
+# Discord's Server Settings > Roles and assign them to whoever should have
+# that tier of access — nothing else to configure unless you used different
+# role names than these defaults.
+#   Administrator — same access as CLAUDE_CODE_OWNER_ID (!code, !deploy,
+#                   and Kasa plugs on top of Home Resident when
+#                   KASA_OWNER_ONLY=1).
+#   Home Resident — required for the household tools (groceries, reminders,
+#                   calendar) and the Kasa smart plug tools.
+ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "Administrator")
+HOUSEHOLD_ROLE_NAME = os.environ.get("HOUSEHOLD_ROLE_NAME", "Home Resident")
+# Which guild's roles to check when a message comes from a DM, since a DM
+# has no guild of its own to read roles from. Auto-detected and fine to
+# leave unset if the bot is only ever in one server (the common case here).
+DISCORD_GUILD_ID = _optional_int("DISCORD_GUILD_ID")
 
 # Geofence webhook (bot/geofence_server.py) — iOS Shortcuts automations hit
 # this on arrive/leave-home to deliver location-triggered reminders. Same

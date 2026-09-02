@@ -1,5 +1,5 @@
 """
-OpenRouter chat wrapper: per-channel history plus a tool-calling loop.
+OpenRouter chat wrapper: per-user history plus a tool-calling loop.
 
 Runs entirely in a worker thread (app.py hands ask_llm to
 asyncio.to_thread), which is why this module uses blocking `requests`
@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import requests
 
 from . import config, metrics
+from .discord_client import display_name
 from .tools import ToolContext, dispatch, get_tool_schemas
 
 log = logging.getLogger("discord-llm-bot.llm")
@@ -33,13 +34,17 @@ _RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _RETRY_ATTEMPTS = 2
 _RETRY_BACKOFF_S = 1.5
 
-# Cap how many channels we keep history for, so a bot sitting in a busy
-# server doesn't accumulate a deque per channel forever. Least-recently-used
-# channels fall off the end.
-_MAX_HISTORY_CHANNELS = 64
+# Cap how many (channel, user) histories we keep, so a bot sitting in a busy
+# server doesn't accumulate a deque per conversation forever.
+# Least-recently-used conversations fall off the end.
+_MAX_HISTORIES = 64
 
-# channel_id -> deque of {"role": ..., "content": ...} dicts
-_history: OrderedDict[int, deque] = OrderedDict()
+# (channel_id, user_id) -> deque of {"role": ..., "content": ...} dicts.
+# Keyed per-user, not just per-channel, so two people talking to the bot in
+# the same server channel each get their own conversation instead of the
+# model seeing their messages interleaved as if from one person — that used
+# to make it e.g. mix up whose room's lights were being asked about.
+_history: OrderedDict[tuple[int, int], deque] = OrderedDict()
 
 # One session, so repeated completions reuse the TCP/TLS connection instead
 # of re-handshaking per message.
@@ -56,16 +61,17 @@ _catalog_fetched_at: float | None = None
 _CATALOG_RETRY_S = 300.0
 
 
-def history_for(channel_id: int) -> deque:
-    """This channel's rolling history, creating it (and evicting the
-    least-recently-used channel) as needed."""
-    existing = _history.get(channel_id)
+def history_for(channel_id: int, user_id: int) -> deque:
+    """This user's rolling history within this channel, creating it (and
+    evicting the least-recently-used conversation) as needed."""
+    key = (channel_id, user_id)
+    existing = _history.get(key)
     if existing is None:
         existing = deque(maxlen=config.HISTORY_TURNS * 2)
-        _history[channel_id] = existing
-        while len(_history) > _MAX_HISTORY_CHANNELS:
+        _history[key] = existing
+        while len(_history) > _MAX_HISTORIES:
             _history.popitem(last=False)
-    _history.move_to_end(channel_id)
+    _history.move_to_end(key)
     return existing
 
 
@@ -92,14 +98,45 @@ def call_openrouter(
     tools: list[dict] | None = None,
     tool_choice: str | None = None,
     timeout: int = 60,
+    user_id: int | None = None,
+    user_name: str | None = None,
 ) -> dict:
     """Sends one chat completion request and returns the response message
-    (a dict with "role", "content", and possibly "tool_calls")."""
-    payload: dict = {"model": config.OPENROUTER_MODEL, "messages": messages}
+    (a dict with "role", "content", and possibly "tool_calls"). `user_id`/
+    `user_name` attribute the resulting metrics.record() call to whoever
+    sent the message that triggered this — see llm_status_server.py's
+    per-user table."""
+    payload: dict = {
+        "model": config.OPENROUTER_MODEL,
+        "messages": messages,
+        # OpenRouter omits per-call cost from `usage` unless asked — this is
+        # the only way to get a per-user credit-usage figure, since the
+        # account-wide key-info endpoint (llm_status_server.py's live
+        # credits tile) has no per-user breakdown at all.
+        "usage": {"include": True},
+        # Some providers default an unset max_tokens to the model's full
+        # context length instead of clamping to what's left after the
+        # input, which 400s every request — see config.OPENROUTER_MAX_TOKENS.
+        "max_tokens": config.OPENROUTER_MAX_TOKENS,
+    }
     if tools:
         payload["tools"] = tools
     if tool_choice:
         payload["tool_choice"] = tool_choice
+    provider: dict = {}
+    if config.OPENROUTER_ZDR:
+        provider["zdr"] = True
+    if tool_choice == "required":
+        # Some providers OpenRouter routes to silently ignore an unsupported
+        # tool_choice and fall back to "auto" instead of erroring — which let
+        # a forced first-turn call return plain text claiming an action
+        # happened when no tool was ever invoked (see the kasa desk-lights
+        # incident). require_parameters restricts routing to providers that
+        # actually honor every parameter in the request, so a forced tool
+        # call either really happens or the request fails loudly.
+        provider["require_parameters"] = True
+    if provider:
+        payload["provider"] = provider
 
     start = time.monotonic()
     resp = _post_with_retry(payload, timeout)
@@ -115,6 +152,9 @@ def call_openrouter(
         output_tokens=usage.get("completion_tokens", 0),
         duration_s=duration_s,
         context_window=_context_window(model),
+        user_id=user_id,
+        user_name=user_name,
+        cost_usd=usage.get("cost") or 0.0,
     )
     return data["choices"][0]["message"]
 
@@ -179,16 +219,19 @@ def _run_tool_calls(tool_calls: list[dict], ctx: ToolContext) -> list[dict]:
     return results
 
 
-def ask_llm(message, user_text: str) -> str:
+def ask_llm(message, user_text: str, roles: frozenset[str] = frozenset()) -> str:
     """Runs the chat + tool-calling loop for one user message and returns
     the final natural-language reply. `message` is the discord.Message that
-    triggered this, passed through to tool handlers as context."""
-    ctx = ToolContext(message=message)
-    channel_history = history_for(ctx.channel_id)
-    tool_schemas = get_tool_schemas()
+    triggered this, passed through to tool handlers as context. `roles` is
+    the author's Discord role names (see permissions.resolve_roles),
+    checked by any role-gated tool (see tools/__init__.py's required_role)."""
+    ctx = ToolContext(message=message, roles=roles)
+    user_id, user_name = ctx.user_id, display_name(message.author)
+    conversation_history = history_for(ctx.channel_id, user_id)
+    tool_schemas = get_tool_schemas(ctx.user_id, ctx.roles)
 
     messages = [{"role": "system", "content": _system_prompt()}]
-    messages.extend(channel_history)
+    messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_text})
 
     for i in range(MAX_TOOL_ITERATIONS):
@@ -197,17 +240,39 @@ def ask_llm(message, user_text: str) -> str:
         # letting the model silently free-text a claimed result. Once that
         # decision's been made, later turns just need to wrap up in plain
         # text, so let those be unconstrained.
+        forced = i == 0
         reply_message = call_openrouter(
-            messages, tools=tool_schemas, tool_choice="required" if i == 0 else "auto"
+            messages,
+            tools=tool_schemas,
+            tool_choice="required" if forced else "auto",
+            user_id=user_id,
+            user_name=user_name,
         )
         tool_calls = reply_message.get("tool_calls")
+
+        if forced and not tool_calls:
+            # require_parameters (see call_openrouter) should keep OpenRouter
+            # from routing this to a provider that ignores tool_choice, but
+            # that's been observed to fail anyway — a forced first turn came
+            # back with plain text confidently claiming an action happened
+            # when no tool was ever called (the desk-lights incident). Retry
+            # once before trusting it; if it happens twice in a row, refuse
+            # to relay what would be an unverified claim.
+            log.warning("Forced tool_choice returned no tool_calls; retrying once")
+            reply_message = call_openrouter(
+                messages, tools=tool_schemas, tool_choice="required", user_id=user_id, user_name=user_name
+            )
+            tool_calls = reply_message.get("tool_calls")
+            if not tool_calls:
+                log.error("Model ignored forced tool_choice twice for channel %s", ctx.channel_id)
+                return "Sorry, something went wrong confirming that — can you try again?"
 
         if not tool_calls:
             # An empty content field would otherwise make the bot silently
             # not reply at all (app.chunk("") yields nothing).
             reply = reply_message.get("content") or "(no reply)"
-            channel_history.append({"role": "user", "content": user_text})
-            channel_history.append({"role": "assistant", "content": reply})
+            conversation_history.append({"role": "user", "content": user_text})
+            conversation_history.append({"role": "assistant", "content": reply})
             return reply
 
         messages.append(reply_message)

@@ -32,3 +32,10 @@ class Bot(discord.Client):
 
 
 client = Bot(intents=intents)
+
+
+def display_name(user) -> str:
+    """A human-readable label for a discord.Member/User, for anything
+    user-facing (metrics attribution, grocery "added by" tags) that
+    shouldn't just show a raw Discord id."""
+    return getattr(user, "display_name", None) or str(user)

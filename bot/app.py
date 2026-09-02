@@ -27,8 +27,8 @@ import discord
 
 from cigboard import server as cigboard_server
 
-from . import claude_bridge, config, deploy, geofence_server, llm_status_server, oauth_server
-from .discord_client import client
+from . import claude_bridge, config, deploy, geofence_server, llm_status_server, oauth_server, permissions
+from .discord_client import client, display_name
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
 
@@ -165,20 +165,27 @@ async def _route(message: discord.Message) -> None:
 
     log.info("Message from %s (dm=%s, mention=%s): %r", message.author, is_dm, is_mention, text)
 
+    # Resolved once per message and threaded through everything below —
+    # both the admin gate (claude_bridge.is_authorized) and role-gated tools
+    # (see ToolContext.roles) need it, and it can involve a Discord API call
+    # for a DM (see permissions.resolve_roles), so it's not worth resolving
+    # more than once per message.
+    roles = await permissions.resolve_roles(message)
+
     # Checked before the thread branch so a restart can still be asked for
     # from inside a Claude Code thread.
     if deploy.is_trigger(text):
-        await _handle_deploy(message, text)
+        await _handle_deploy(message, text, roles)
     elif in_code_thread:
-        await _handle_thread_followup(message, text)
+        await _handle_thread_followup(message, text, roles)
     elif claude_bridge.is_trigger(text):
-        await _handle_code(message, text)
+        await _handle_code(message, text, roles)
     else:
-        await _handle_chat(message, text)
+        await _handle_chat(message, text, roles)
 
 
-async def _handle_deploy(message: discord.Message, text: str) -> None:
-    if not claude_bridge.is_authorized(message.author.id):
+async def _handle_deploy(message: discord.Message, text: str, roles: frozenset[str]) -> None:
+    if not claude_bridge.is_authorized(message.author.id, roles):
         await message.channel.send("You're not authorized to deploy.")
         return
     if not deploy.is_force(text):
@@ -195,18 +202,18 @@ async def _handle_deploy(message: discord.Message, text: str) -> None:
     deploy.restart(message.channel.id)
 
 
-async def _handle_thread_followup(message: discord.Message, text: str) -> None:
-    if not claude_bridge.is_authorized(message.author.id):
+async def _handle_thread_followup(message: discord.Message, text: str, roles: frozenset[str]) -> None:
+    if not claude_bridge.is_authorized(message.author.id, roles):
         return
     # The prefix is optional in here, but harmless if repeated out of habit.
     prompt = claude_bridge.strip_trigger(text)
     prompt = text if prompt is None else prompt
     if prompt:
-        await _run_claude_bridge(message.channel, prompt)
+        await _run_claude_bridge(message.channel, prompt, message.author.id, display_name(message.author))
 
 
-async def _handle_code(message: discord.Message, text: str) -> None:
-    if not claude_bridge.is_authorized(message.author.id):
+async def _handle_code(message: discord.Message, text: str, roles: frozenset[str]) -> None:
+    if not claude_bridge.is_authorized(message.author.id, roles):
         await message.channel.send("You're not authorized to use Claude Code through this bot.")
         return
     prompt = claude_bridge.strip_trigger(text)
@@ -227,14 +234,14 @@ async def _handle_code(message: discord.Message, text: str) -> None:
             log.exception("Failed to create thread for Claude Code bridge, replying inline instead")
             target = message.channel
 
-    await _run_claude_bridge(target, prompt)
+    await _run_claude_bridge(target, prompt, message.author.id, display_name(message.author))
 
 
-async def _run_claude_bridge(channel, prompt: str) -> None:
+async def _run_claude_bridge(channel, prompt: str, user_id: int, user_name: str) -> None:
     log.info("Claude Code bridge prompt in channel %s: %r", channel.id, prompt)
     async with channel.typing():
         try:
-            reply = await claude_bridge.run(channel.id, prompt)
+            reply = await claude_bridge.run(channel.id, prompt, user_id, user_name)
         except Exception:
             log.exception("Claude Code bridge failed")
             await channel.send(_BRIDGE_ERROR)
@@ -242,14 +249,14 @@ async def _run_claude_bridge(channel, prompt: str) -> None:
     await send_text(channel, reply)
 
 
-async def _handle_chat(message: discord.Message, text: str) -> None:
+async def _handle_chat(message: discord.Message, text: str, roles: frozenset[str]) -> None:
     async with message.channel.typing():
         try:
             # ask_llm is synchronous and makes several blocking HTTP calls
             # (plus tool work) that can run for a minute or more; running it
             # inline would stall the gateway heartbeat and every other
             # channel, reminder timer and local HTTP server in this process.
-            reply = await asyncio.to_thread(ask_llm, message, text)
+            reply = await asyncio.to_thread(ask_llm, message, text, roles)
         except Exception:
             log.exception("LLM call failed")
             await message.channel.send(_LLM_ERROR)

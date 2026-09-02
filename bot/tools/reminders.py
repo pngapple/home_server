@@ -27,6 +27,10 @@ from . import ToolContext, tool
 
 log = logging.getLogger("discord-llm-bot.tools.reminders")
 
+# A household tool — gated to config.HOUSEHOLD_ROLE_NAME (see permissions.py)
+# so randoms in the server/DMs can't touch it.
+_HOUSEHOLD = config.HOUSEHOLD_ROLE_NAME
+
 TRIGGERS = ("arrive", "leave")
 
 
@@ -127,6 +131,7 @@ def pop_location_reminders(trigger: str) -> list[dict]:
         },
     },
     required=["when_iso", "text"],
+    required_role=_HOUSEHOLD,
 )
 def handle_set_reminder(arguments: dict, ctx: ToolContext) -> str:
     when_iso = arguments["when_iso"]
@@ -174,6 +179,7 @@ def handle_set_reminder(arguments: dict, ctx: ToolContext) -> str:
         },
     },
     required=["trigger", "text"],
+    required_role=_HOUSEHOLD,
 )
 def handle_set_location_reminder(arguments: dict, ctx: ToolContext) -> str:
     trigger = arguments["trigger"]
