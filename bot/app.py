@@ -27,7 +27,7 @@ import discord
 
 from cigboard import server as cigboard_server
 
-from . import claude_bridge, config, deploy, geofence_server, llm_status_server, oauth_server, permissions
+from . import claude_bridge, config, deploy, geofence_server, llm_status_server, moderation, oauth_server, permissions
 from .discord_client import client, display_name
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
@@ -184,6 +184,38 @@ async def _route(message: discord.Message) -> None:
         await _handle_chat(message, text, roles)
 
 
+async def _patch_notes_channel() -> discord.abc.Messageable | None:
+    """config.PATCH_NOTES_CHANNEL_ID resolved to an actual channel, or None
+    if it's unset or can't be fetched. Tries the client's cache first (cheap,
+    populated for any channel the bot has already seen) before falling back
+    to a REST call."""
+    if config.PATCH_NOTES_CHANNEL_ID is None:
+        return None
+    channel = client.get_channel(config.PATCH_NOTES_CHANNEL_ID)
+    if channel is not None:
+        return channel
+    try:
+        return await client.fetch_channel(config.PATCH_NOTES_CHANNEL_ID)
+    except discord.HTTPException:
+        log.exception("Failed to fetch patch-notes channel %s", config.PATCH_NOTES_CHANNEL_ID)
+        return None
+
+
+async def _broadcast_deploy_update(origin_channel, text: str, header: str | None = None) -> None:
+    """Sends `text` to `origin_channel` (wherever !deploy was actually run),
+    and mirrors it into config.PATCH_NOTES_CHANNEL_ID too, if configured and
+    different from `origin_channel` — so that channel accumulates a running
+    log of every deploy regardless of where each one was triggered from.
+    `header` (e.g. who ran it) is prefixed only on the patch-notes copy,
+    since the origin channel already has that context from the Discord
+    message itself."""
+    await origin_channel.send(text)
+    patch_notes = await _patch_notes_channel()
+    if patch_notes is None or patch_notes.id == origin_channel.id:
+        return
+    await patch_notes.send(f"{header}\n{text}" if header else text)
+
+
 async def _handle_deploy(message: discord.Message, text: str, roles: frozenset[str]) -> None:
     if not claude_bridge.is_authorized(message.author.id, roles):
         await message.channel.send("You're not authorized to deploy.")
@@ -198,7 +230,18 @@ async def _handle_deploy(message: discord.Message, text: str, roles: frozenset[s
                 f"`{deploy.TRIGGER_PREFIX} {deploy.FORCE_ARG}` to restart anyway."
             )
             return
-    await message.channel.send("🔄 Restarting now — back in a few seconds.")
+
+    header = f"**Deploy by {display_name(message.author)}**"
+
+    commit_summary = await asyncio.to_thread(
+        deploy.commit_and_push, message.author.id, display_name(message.author)
+    )
+    if commit_summary:
+        await _broadcast_deploy_update(message.channel, commit_summary, header)
+
+    await _broadcast_deploy_update(
+        message.channel, "🔄 Restarting now — back in a few seconds.", header if not commit_summary else None
+    )
     deploy.restart(message.channel.id)
 
 
@@ -250,6 +293,11 @@ async def _run_claude_bridge(channel, prompt: str, user_id: int, user_name: str)
 
 
 async def _handle_chat(message: discord.Message, text: str, roles: frozenset[str]) -> None:
+    verdict = await moderation.enforce(message, roles, text)
+    if verdict is not None:
+        await message.channel.send(verdict)
+        return
+
     async with message.channel.typing():
         try:
             # ask_llm is synchronous and makes several blocking HTTP calls

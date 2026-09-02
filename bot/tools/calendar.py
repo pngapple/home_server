@@ -108,6 +108,16 @@ def handle_connect(arguments: dict, ctx: ToolContext) -> str:
         },
         "description": {"type": "string", "description": "Optional longer note/details for the event."},
         "location": {"type": "string", "description": "Optional location text."},
+        "recurrence": {
+            "type": "string",
+            "description": (
+                "Optional RFC 5545 RRULE to make this a repeating event, e.g. "
+                "'RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR' for every Mon/Wed/Fri, "
+                "'RRULE:FREQ=DAILY;COUNT=10' for the next 10 days, or "
+                "'RRULE:FREQ=MONTHLY;BYMONTHDAY=1;UNTIL=20271231T000000Z' for "
+                "the 1st of every month until a date. Omit for a one-off event."
+            ),
+        },
     },
     required=["summary", "start_iso"],
     required_role=_HOUSEHOLD,
@@ -138,6 +148,10 @@ def handle_create_event(arguments: dict, ctx: ToolContext) -> str:
     for optional in ("description", "location"):
         if arguments.get(optional):
             event[optional] = arguments[optional]
+
+    recurrence = arguments.get("recurrence")
+    if recurrence:
+        event["recurrence"] = [recurrence]
 
     try:
         created = service.events().insert(calendarId="primary", body=event).execute()

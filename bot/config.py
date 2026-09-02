@@ -124,6 +124,14 @@ CLAUDE_CODE_TIMEOUT_SECONDS = int(os.environ.get("CLAUDE_CODE_TIMEOUT_SECONDS", 
 # include ~/.local/bin, where the CLI actually lives.
 CLAUDE_CODE_BINARY = os.environ.get("CLAUDE_CODE_BINARY", "/home/mjxu/.local/bin/claude")
 
+# Every !deploy's commit summary and restart notice is mirrored into this
+# channel on top of wherever !deploy was actually run, so there's one place
+# with a running log of what's shipped regardless of which channel/DM
+# triggered each deploy. Right-click the channel in Discord (Developer Mode
+# on) > Copy Channel ID. Unset (None, the default) means deploy updates only
+# go to the triggering channel, same as before this existed.
+PATCH_NOTES_CHANNEL_ID = _optional_int("PATCH_NOTES_CHANNEL_ID")
+
 # Discord role-based permissions (bot/permissions.py). Create these roles in
 # Discord's Server Settings > Roles and assign them to whoever should have
 # that tier of access — nothing else to configure unless you used different
@@ -139,6 +147,24 @@ HOUSEHOLD_ROLE_NAME = os.environ.get("HOUSEHOLD_ROLE_NAME", "Home Resident")
 # has no guild of its own to read roles from. Auto-detected and fine to
 # leave unset if the bot is only ever in one server (the common case here).
 DISCORD_GUILD_ID = _optional_int("DISCORD_GUILD_ID")
+
+# Auto-moderation (bot/moderation.py). Every ordinary chat message (not
+# !code/!deploy, and never from an admin — see permissions.is_admin) is run
+# through a cheap classification call before reaching the main model; a
+# flagged message is refused, and repeat offenses within
+# MODERATION_STRIKE_WINDOW_DAYS escalate to a real Discord timeout (requires
+# the bot to have the "Timeout Members" permission in the guild — DMs can't
+# be timed out, so those just get the warning/refusal).
+MODERATION_ENABLED = _flag("MODERATION_ENABLED", default=True)
+# Reuses OPENROUTER_MODEL by default; override to route classification to a
+# separate (e.g. cheaper/faster) model without affecting normal chat.
+MODERATION_MODEL = os.environ.get("MODERATION_MODEL") or OPENROUTER_MODEL
+MODERATION_STRIKES_FILE = os.environ.get("MODERATION_STRIKES_FILE", "moderation.json")
+MODERATION_STRIKE_WINDOW_DAYS = int(os.environ.get("MODERATION_STRIKE_WINDOW_DAYS", "7"))
+# 1st flagged message in the window: refused, no timeout. 2nd: timed out for
+# TIER2 minutes. 3rd and beyond: TIER3 minutes.
+MODERATION_TIMEOUT_MINUTES_TIER2 = int(os.environ.get("MODERATION_TIMEOUT_MINUTES_TIER2", "10"))
+MODERATION_TIMEOUT_MINUTES_TIER3 = int(os.environ.get("MODERATION_TIMEOUT_MINUTES_TIER3", "60"))
 
 # Geofence webhook (bot/geofence_server.py) — iOS Shortcuts automations hit
 # this on arrive/leave-home to deliver location-triggered reminders. Same
