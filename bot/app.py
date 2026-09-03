@@ -231,17 +231,28 @@ async def _handle_deploy(message: discord.Message, text: str, roles: frozenset[s
             )
             return
 
+    # commit_and_push below can take a few seconds (it may call out to the
+    # LLM for a commit message) with nothing else posted in the meantime —
+    # react immediately so the user knows the command was actually received
+    # rather than wondering if it silently failed.
+    try:
+        await message.add_reaction("🚀")
+    except discord.HTTPException:
+        log.exception("Failed to react to deploy message %s", message.id)
+
     header = f"**Deploy by {display_name(message.author)}**"
 
     commit_summary = await asyncio.to_thread(
         deploy.commit_and_push, message.author.id, display_name(message.author)
     )
     if commit_summary:
+        # Only the actual change summary is a "patch note" — mirror this one
+        # into the patch-notes channel.
         await _broadcast_deploy_update(message.channel, commit_summary, header)
 
-    await _broadcast_deploy_update(
-        message.channel, "🔄 Restarting now — back in a few seconds.", header if not commit_summary else None
-    )
+    # Purely operational status (nobody reading patch notes later cares that
+    # a restart happened at some point) — origin channel only.
+    await message.channel.send("🔄 Restarting now — back in a few seconds.")
     deploy.restart(message.channel.id)
 
 

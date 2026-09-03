@@ -40,12 +40,15 @@ _NOTIFY_FILE = "deploy_notify.json"
 
 _COMMIT_MESSAGE_SYSTEM_PROMPT = (
     "You write git commit messages for a personal Discord bot project. "
-    "Given a `git diff --cached`, respond with ONLY the commit message: a "
-    "short imperative-mood summary line (under 72 characters, no trailing "
-    "period), optionally followed by a blank line and a couple of sentences "
-    "of body explaining *why* the change was made if that's not obvious "
-    "from the diff alone. No markdown, no code fences, no commentary "
-    "outside the message itself."
+    "The user message below is the output of `git diff --cached` — read it "
+    "to understand what changed, but do not reproduce any of it. Respond "
+    "with ONLY the commit message: a short imperative-mood summary line "
+    "(under 72 characters, no trailing period) describing *what changed*, "
+    "optionally followed by a blank line and a couple of sentences of body "
+    "explaining *why* the change was made if that's not obvious from the "
+    "diff alone. Never include diff syntax (file paths, `diff --git`, `@@` "
+    "hunk headers, +/- lines) in your answer. No markdown, no code fences, "
+    "no commentary outside the message itself."
 )
 
 # Diffs beyond this are truncated before being sent to the model — plenty
@@ -53,6 +56,21 @@ _COMMIT_MESSAGE_SYSTEM_PROMPT = (
 _MAX_DIFF_CHARS = 12000
 
 _GENERIC_COMMIT_MESSAGE = "Deploy: automatic commit of pending changes"
+
+# The requested summary-line limit (see _COMMIT_MESSAGE_SYSTEM_PROMPT), given
+# slack for models that run a little over rather than truncating a message
+# that's otherwise fine.
+_MAX_SUMMARY_CHARS = 120
+
+# Substrings that show up in a raw `git diff` but never in a real commit
+# summary — a cheap check for the model having echoed the diff back (or a
+# chunk of it) instead of summarizing it, which then gets broadcast to
+# Discord as a "patch note" verbatim.
+_DIFF_MARKERS = ("diff --git", "@@ -", "--- a/", "+++ b/")
+
+
+def _looks_like_diff(summary: str) -> bool:
+    return any(marker in summary for marker in _DIFF_MARKERS)
 
 
 def _args(text: str) -> str | None:
@@ -100,7 +118,11 @@ def _commit_message(staged_diff: str, user_id: int | None, user_name: str | None
             user_name=user_name,
         )
         message = (reply.get("content") or "").strip()
-        return message or _GENERIC_COMMIT_MESSAGE
+        summary = message.splitlines()[0] if message else ""
+        if not summary or _looks_like_diff(summary) or len(summary) > _MAX_SUMMARY_CHARS:
+            log.warning("Discarding malformed commit message from model: %r", message[:200])
+            return _GENERIC_COMMIT_MESSAGE
+        return message
     except Exception:
         log.exception("Failed to generate a commit message; using a generic one")
         return _GENERIC_COMMIT_MESSAGE
