@@ -166,10 +166,35 @@ MODERATION_STRIKE_WINDOW_DAYS = int(os.environ.get("MODERATION_STRIKE_WINDOW_DAY
 MODERATION_TIMEOUT_MINUTES_TIER2 = int(os.environ.get("MODERATION_TIMEOUT_MINUTES_TIER2", "10"))
 MODERATION_TIMEOUT_MINUTES_TIER3 = int(os.environ.get("MODERATION_TIMEOUT_MINUTES_TIER3", "60"))
 
-# Geofence webhook (bot/geofence_server.py) — iOS Shortcuts automations hit
-# this on arrive/leave-home to deliver location-triggered reminders. Same
-# local-only-server-behind-nginx pattern as the oauth/status/cigboard servers
-# above. Secret is a shared token Shortcuts sends back, required to trigger.
+# Geofence webhook (bot/geofence_server.py) — each resident's phone runs its
+# own iOS Shortcuts automation that hits this on arrive/leave-home, to
+# deliver location-triggered reminders. Same local-only-server-behind-nginx
+# pattern as the oauth/status/cigboard servers above.
 GEOFENCE_SERVER_PORT = int(os.environ.get("GEOFENCE_SERVER_PORT", "8793"))
-GEOFENCE_WEBHOOK_SECRET = os.environ.get("GEOFENCE_WEBHOOK_SECRET")
-GEOFENCE_NOTIFY_USER_ID = _optional_int("GEOFENCE_NOTIFY_USER_ID") or CLAUDE_CODE_OWNER_ID
+
+
+def _parse_geofence_users(raw: str) -> dict[str, int]:
+    """GEOFENCE_USERS maps each resident's own webhook secret to their
+    Discord user id — format 'secret1:discord_id1,secret2:discord_id2,...',
+    one entry per phone. Per-person secrets (rather than one shared secret)
+    are what let one resident's phone arriving/leaving only ever affect
+    their own reminders, never a housemate's — see geofence_server.py."""
+    users: dict[str, int] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        secret, _, user_id = entry.partition(":")
+        if not secret or not user_id:
+            raise RuntimeError(f"Malformed GEOFENCE_USERS entry {entry!r} — expected 'secret:discord_id'.")
+        users[secret] = int(user_id)
+    return users
+
+
+GEOFENCE_USERS = _parse_geofence_users(os.environ.get("GEOFENCE_USERS", ""))
+
+# Persists the last-seen geofence event (arrive/leave) per resident — see
+# tools/reminders.record_geofence_event — so a process restart knows
+# whether a recurring location reminder should already be active, instead
+# of waiting for the next webhook to find out.
+GEOFENCE_STATE_FILE = os.environ.get("GEOFENCE_STATE_FILE", "geofence_state.json")

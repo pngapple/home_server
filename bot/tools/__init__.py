@@ -169,7 +169,7 @@ def _handle_no_action(arguments: dict, ctx: ToolContext) -> str:
 
 
 # Tool modules, imported for their @tool registrations. Add new tools here.
-_TOOL_MODULES = ("reminders", "calendar", "kasa", "cigarettes", "todos", "groceries")
+_TOOL_MODULES = ("reminders", "calendar", "kasa", "cigarettes", "todos", "groceries", "geofence_admin")
 
 for _module in _TOOL_MODULES:
     import_module(f"{__name__}.{_module}")

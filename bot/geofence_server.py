@@ -6,8 +6,13 @@ URL) and turns them into Discord DMs.
 Bound to 127.0.0.1 — nginx reverse-proxies /geofence/webhook to it from the
 Tailscale-only interface, same pattern as /calendar/oauth/callback and the
 other local dashboards (see /etc/nginx/sites-available/status). The phone
-needs Tailscale connected for the request to land; the shared secret is the
-only auth, so keep it out of source control (.env, not committed).
+needs Tailscale connected for the request to land.
+
+Each resident's phone sends its own secret (config.GEOFENCE_USERS maps
+secret -> Discord user id) rather than one shared secret for the household —
+that's what identifies whose arrive/leave event this is, so one resident
+getting home doesn't fire another resident's location reminders. Keep the
+secrets out of source control (.env, not committed).
 """
 
 import hmac
@@ -17,7 +22,7 @@ from aiohttp import web
 
 from . import config, webserver
 from .discord_client import client
-from .tools.reminders import pop_location_reminders
+from .tools import reminders
 
 log = logging.getLogger("discord-llm-bot.geofence_server")
 
@@ -33,8 +38,23 @@ async def _notify(user_id: int, text: str) -> None:
         log.exception("Failed to deliver geofence notification to user %s", user_id)
 
 
+def _match_user(secret: bytes) -> int | None:
+    """Which resident this secret belongs to, or None if it matches nobody.
+    Checks every configured secret rather than stopping at the first
+    mismatch, so response timing can't be used to narrow down which secret
+    (if any) is close to correct."""
+    matched = None
+    for candidate_secret, candidate_user_id in config.GEOFENCE_USERS.items():
+        # Compare as bytes: hmac.compare_digest raises TypeError on str
+        # inputs containing non-ASCII, which an arbitrary query string can
+        # easily have.
+        if hmac.compare_digest(secret, candidate_secret.encode()):
+            matched = candidate_user_id
+    return matched
+
+
 async def handle_webhook(request: web.Request) -> web.Response:
-    if not config.GEOFENCE_WEBHOOK_SECRET:
+    if not config.GEOFENCE_USERS:
         return web.Response(status=503, text="Geofence webhook not configured.")
 
     params = dict(request.query)
@@ -44,24 +64,21 @@ async def handle_webhook(request: web.Request) -> web.Response:
         except Exception:
             log.warning("Ignoring unparseable geofence POST body", exc_info=True)
 
-    # Compare as bytes: hmac.compare_digest raises TypeError on str inputs
-    # containing non-ASCII, which an arbitrary query string can easily have.
-    secret = str(params.get("secret", "")).encode()
-    if not hmac.compare_digest(secret, config.GEOFENCE_WEBHOOK_SECRET.encode()):
+    user_id = _match_user(str(params.get("secret", "")).encode())
+    if user_id is None:
         return web.Response(status=403, text="Bad secret.")
 
     trigger = params.get("event")
     if trigger not in ("arrive", "leave"):
         return web.Response(status=400, text="event must be 'arrive' or 'leave'.")
 
-    if config.GEOFENCE_NOTIFY_USER_ID is None:
-        log.warning("Geofence event %r received but GEOFENCE_NOTIFY_USER_ID is unset", trigger)
-        return web.Response(status=503, text="No notify user configured.")
+    log.info("Geofence event: %s for user %s", trigger, user_id)
+    await _notify(user_id, _ARRIVE_MESSAGE if trigger == "arrive" else _LEAVE_MESSAGE)
 
-    log.info("Geofence event: %s", trigger)
-    await _notify(config.GEOFENCE_NOTIFY_USER_ID, _ARRIVE_MESSAGE if trigger == "arrive" else _LEAVE_MESSAGE)
+    reminders.record_geofence_event(user_id, trigger)
+    reminders.sync_recurring_for_event(user_id, trigger)
 
-    for reminder in pop_location_reminders(trigger):
+    for reminder in reminders.pop_location_reminders(user_id, trigger):
         await _notify(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
 
     return web.Response(text="ok")
@@ -74,7 +91,7 @@ async def start() -> None:
         [
             web.post("/geofence/webhook", handle_webhook),
             # Shortcuts defaults to GET unless changed. Note a GET puts the
-            # shared secret in the query string, where nginx logs it in plain
+            # secret in the query string, where nginx logs it in plain
             # text — prefer configuring the Shortcut to POST a form body.
             web.get("/geofence/webhook", handle_webhook),
         ],

@@ -53,6 +53,19 @@ def _find(items: list[dict], identifier: str) -> list[dict]:
     return [item for item in open_items if needle in item["text"].lower()]
 
 
+def find_open(user_id: int, identifier: str) -> list[dict]:
+    """Public wrapper around _find, for other tools (recurring location
+    reminders in tools/reminders.py) that need to resolve a todo by the same
+    text-snippet matching complete_todo uses."""
+    return _find(_load(user_id), identifier)
+
+
+def get_todo(user_id: int, todo_id: str) -> dict | None:
+    """Look up one todo by id, so tools/reminders.py's recurring location
+    reminders can check whether the item they're linked to is still open."""
+    return next((item for item in _load(user_id) if item["id"] == todo_id), None)
+
+
 # Discord doesn't render box-drawing characters aligned outside a monospace
 # code block, so the card is always wrapped in ``` fences. The title sits
 # *above* the frame rather than inside a bordered line — emoji render at an
