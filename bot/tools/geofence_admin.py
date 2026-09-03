@@ -1,34 +1,28 @@
 """
 Admin tool: onboards a new resident's phone for location-based reminders
-(bot/geofence_server.py, tools/reminders.py) without an admin editing .env
-by hand — generates that resident a fresh webhook secret, appends it to
-GEOFENCE_USERS in .env, and DMs them the secret plus the Shortcuts setup
-steps.
+(bot/geofence_server.py, tools/reminders.py) — generates that resident a
+fresh webhook secret and DMs them the secret plus the Shortcuts setup steps.
 
-Deliberately does NOT restart the service itself: config.GEOFENCE_USERS is
-only read at process startup (see config.py's load_dotenv()), same as every
-other .env value, so the new secret only takes effect once someone runs
-!deploy — restarting from inside a tool call would kill this very
-tool-calling loop before it could reply (see deploy.py's docstring for why
-that restart is handled as its own explicit, human-triggered step instead).
+The secret lives on the resident's profile (see ../users.py). It used to be
+appended to GEOFENCE_USERS in .env by regex-rewriting that file in place,
+which meant registration didn't actually take effect until someone ran
+!deploy, because config.py only parses .env at import. Storing it with the
+rest of that person's settings makes registration live immediately, and
+takes about seventy lines of string surgery on a config file out of this
+module.
+
+Secrets already in .env from before that change are migrated into the
+profile store at startup by users.seed_geofence_from_env(), so nobody has to
+re-register a phone.
 """
 
-import asyncio
 import logging
-import os
 import re
-import secrets
-import threading
 
-from .. import config
-from ..discord_client import client
+from .. import config, notify, users
 from . import ToolContext, tool
 
 log = logging.getLogger("discord-llm-bot.tools.geofence_admin")
-
-_env_lock = threading.Lock()
-
-_GEOFENCE_USERS_RE = re.compile(r"^GEOFENCE_USERS=(.*)$", re.MULTILINE)
 
 _SETUP_INSTRUCTIONS = """\
 You're set up for location-based reminders. In the Shortcuts app on your phone:
@@ -36,7 +30,7 @@ You're set up for location-based reminders. In the Shortcuts app on your phone:
 1. Automation tab -> + -> Create Personal Automation -> Arrive -> pick your \
 home, tap Next.
 2. Add action "Get Contents of URL":
-   URL: http://raspberrypi.tail4ce93a.ts.net/geofence/webhook
+   URL: {webhook_url}
    Method: POST (tap "Show More" to change it)
    Request Body: Form, with two fields:
      event = arrive
@@ -51,73 +45,21 @@ take out the trash" or "add dishes to my todo list and remind me every 30 \
 minutes while I'm home until it's done"."""
 
 
-def _env_path() -> str:
-    return os.path.join(config.CLAUDE_CODE_WORKDIR, ".env")
-
-
-def _read_env() -> str:
-    with open(_env_path()) as f:
-        return f.read()
-
-
-def _write_env(text: str) -> None:
-    path = _env_path()
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        f.write(text)
-    os.replace(tmp, path)
-
-
-def _existing_secret(env_text: str, user_id: int) -> str | None:
-    match = _GEOFENCE_USERS_RE.search(env_text)
-    if not match:
-        return None
-    for entry in match.group(1).split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        entry_secret, _, entry_user_id = entry.partition(":")
-        if entry_user_id == str(user_id):
-            return entry_secret
-    return None
-
-
-def _add_geofence_user(user_id: int, secret: str) -> None:
-    """Appends `secret:user_id` to GEOFENCE_USERS in .env (creating the key
-    if it's missing entirely). Locked so two concurrent registrations can't
-    clobber each other's read-modify-write of the same line."""
-    new_entry = f"{secret}:{user_id}"
-    with _env_lock:
-        text = _read_env()
-        match = _GEOFENCE_USERS_RE.search(text)
-        if match:
-            current = match.group(1).strip()
-            updated_value = f"{current},{new_entry}" if current else new_entry
-            text = text[: match.start(1)] + updated_value + text[match.end(1) :]
-        else:
-            if text and not text.endswith("\n"):
-                text += "\n"
-            text += f"GEOFENCE_USERS={new_entry}\n"
-        _write_env(text)
-
-
-async def _dm_setup(user_id: int, secret: str) -> None:
-    try:
-        user = await client.fetch_user(user_id)
-        await user.send(_SETUP_INSTRUCTIONS.format(secret=secret))
-    except Exception:
-        log.exception("Failed to DM geofence setup instructions to user %s", user_id)
+def _webhook_url() -> str:
+    """Derived from the OAuth redirect URI so the host only has to be
+    configured once — both are served by nginx off the same Tailscale-only
+    interface (see sites-available/status)."""
+    base = config.GOOGLE_REDIRECT_URI.split("/calendar/")[0]
+    return f"{base}/geofence/webhook"
 
 
 @tool(
     name="register_location_user",
     description=(
         "Onboard a new resident's phone for location-based reminders: "
-        "generates them a fresh geofence webhook secret, adds it to the "
-        "server's config, and DMs them their secret plus the Shortcuts "
-        "setup steps. Restricted to admins. A !deploy restart is still "
-        "needed afterward before the new secret actually takes effect — "
-        "say so in your reply."
+        "generates them a fresh geofence webhook secret, saves it to their "
+        "profile, and DMs them their secret plus the Shortcuts setup steps. "
+        "Takes effect immediately — no restart needed. Restricted to admins."
     ),
     properties={
         "discord_user_id": {
@@ -137,18 +79,13 @@ def handle_register_location_user(arguments: dict, ctx: ToolContext) -> str:
         return "Error: discord_user_id must contain a numeric Discord user id."
     user_id = int(digits)
 
-    existing = _existing_secret(_read_env(), user_id)
-    if existing is not None:
-        secret = existing
-        status = f"<@{user_id}> was already registered — resent their setup instructions."
-    else:
-        secret = secrets.token_urlsafe(24)
-        _add_geofence_user(user_id, secret)
-        status = (
-            f"Registered <@{user_id}> for location reminders and DMed them setup "
-            "instructions. Run `!deploy` to activate it — the new secret won't "
-            "work until the service restarts."
-        )
+    secret, created = users.ensure_geofence_secret(user_id)
+    notify.dm(user_id, _SETUP_INSTRUCTIONS.format(secret=secret, webhook_url=_webhook_url()))
 
-    asyncio.run_coroutine_threadsafe(_dm_setup(user_id, secret), client.loop)
-    return status
+    if created:
+        log.info("Registered user %s for location reminders", user_id)
+        return (
+            f"Registered <@{user_id}> for location reminders and DMed them setup "
+            "instructions. It's active right away — no restart needed."
+        )
+    return f"<@{user_id}> was already registered — resent their setup instructions."

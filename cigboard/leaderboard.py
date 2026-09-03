@@ -7,17 +7,20 @@ entry per logged cigarette). Pure data-in, data-out: no Discord/HTTP here.
 import logging
 from datetime import datetime, timedelta
 
-from bot import config, jsonstore
+from bot import config
+from bot.store import user_store
 
 log = logging.getLogger("discord-llm-bot.cigboard.leaderboard")
+
+# The same file bot/tools/cigarettes.py writes to. Constructed here rather
+# than imported from the tool module so the leaderboard doesn't drag the
+# whole LLM tool registry in behind it; UserKeyedStore is the shared shape,
+# which is the part worth sharing.
+CIGARETTES = user_store(config.CIGARETTES_FILE, list)
 
 # How many trailing days of daily counts to hand back per user, for the
 # sparkline on each leaderboard card.
 SPARKLINE_DAYS = 14
-
-
-def _load() -> dict[str, list[str]]:
-    return jsonstore.read(config.CIGARETTES_FILE, {})
 
 
 def _local_dates(timestamps: list[str]):
@@ -66,7 +69,7 @@ def _stats_for(user_id: str, timestamps: list[str], now) -> dict:
 
 def compute() -> list[dict]:
     """Returns per-user stats sorted by all-time total, descending."""
-    data = _load()
+    data = CIGARETTES.all()
     now = datetime.now(config.LOCAL_TZ)
     rows = [_stats_for(uid, ts, now) for uid, ts in data.items() if ts]
     rows.sort(key=lambda r: r["total"], reverse=True)

@@ -18,10 +18,6 @@ from . import ToolContext, tool
 
 log = logging.getLogger("discord-llm-bot.tools.calendar")
 
-# A household tool — gated to config.HOUSEHOLD_ROLE_NAME (see permissions.py)
-# so randoms in the server/DMs can't touch it.
-_HOUSEHOLD = config.HOUSEHOLD_ROLE_NAME
-
 _NOT_CONNECTED = (
     "Error: this user hasn't connected their Google Calendar yet. Call "
     "connect_google_calendar to send them a link, then ask them to try "
@@ -69,7 +65,7 @@ def _parse_local(iso: str) -> datetime | None:
         "this if they ask to schedule an event but haven't linked their "
         "calendar yet (create_calendar_event will tell you if that's the case)."
     ),
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_connect(arguments: dict, ctx: ToolContext) -> str:
     if google_oauth.is_connected(ctx.user_id):
@@ -120,7 +116,7 @@ def handle_connect(arguments: dict, ctx: ToolContext) -> str:
         },
     },
     required=["summary", "start_iso"],
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_create_event(arguments: dict, ctx: ToolContext) -> str:
     start_iso = arguments["start_iso"]
@@ -177,7 +173,7 @@ def handle_create_event(arguments: dict, ctx: ToolContext) -> str:
         "end_iso": {"type": "string", "description": f"Range end, {_LOCAL_ISO_FORMAT_NOTE}."},
     },
     required=["start_iso", "end_iso"],
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_list_events(arguments: dict, ctx: ToolContext) -> str:
     start_dt = _parse_local(arguments["start_iso"])

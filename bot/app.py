@@ -27,7 +27,18 @@ import discord
 
 from cigboard import server as cigboard_server
 
-from . import claude_bridge, config, deploy, geofence_server, llm_status_server, moderation, oauth_server, permissions
+from . import (
+    claude_bridge,
+    config,
+    deploy,
+    geofence_server,
+    llm_status_server,
+    metrics,
+    moderation,
+    oauth_server,
+    permissions,
+    users,
+)
 from .discord_client import client, display_name
 from .llm import ask_llm
 from .tools.reminders import reschedule_pending
@@ -112,6 +123,29 @@ async def on_ready():
         return
     _started = True
 
+    # Copies any geofence secrets still living in .env onto their owners'
+    # profiles, so phones registered before profiles existed keep working.
+    # Idempotent, and a no-op once GEOFENCE_USERS is gone from .env.
+    try:
+        users.seed_geofence_from_env()
+    except Exception:
+        log.exception("Failed to migrate geofence secrets from .env into profiles")
+
+    # Bounds the metrics database, now that it keeps real history rather
+    # than the last 200 calls (see metrics.py).
+    try:
+        metrics.prune()
+    except Exception:
+        log.exception("Failed to prune old metrics rows")
+
+    # Give a profile to anyone who has data here but hasn't messaged since
+    # profiles existed, so the leaderboard and shared grocery list show real
+    # names immediately rather than placeholders until each person speaks.
+    try:
+        await users.backfill_from_discord()
+    except Exception:
+        log.exception("Failed to backfill profiles from Discord")
+
     reschedule_pending()
     for name, start in _SIDECARS:
         try:
@@ -171,6 +205,16 @@ async def _route(message: discord.Message) -> None:
     # for a DM (see permissions.resolve_roles), so it's not worth resolving
     # more than once per message.
     roles = await permissions.resolve_roles(message)
+
+    # Refresh who this is while a live discord.Member is in hand — the one
+    # write path for profiles (see users.touch). Only actually writes when
+    # the name/avatar changed or last_seen went stale, so an active
+    # conversation doesn't rewrite the file per message. Never let a profile
+    # problem stop a message from being answered.
+    try:
+        users.touch(message.author)
+    except Exception:
+        log.exception("Failed to update profile for %s", message.author.id)
 
     # Checked before the thread branch so a restart can still be asked for
     # from inside a Claude Code thread.

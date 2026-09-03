@@ -14,14 +14,13 @@ cigboard/ reads the same file for the leaderboard.
 import logging
 from datetime import UTC, datetime
 
-from .. import config, jsonstore
+from .. import config
+from ..store import user_store
 from . import ToolContext, tool
 
 log = logging.getLogger("discord-llm-bot.tools.cigarettes")
 
-
-def _load() -> dict[str, list[str]]:
-    return jsonstore.read(config.CIGARETTES_FILE, {})
+CIGARETTES = user_store(config.CIGARETTES_FILE, list)
 
 
 def _today_count(timestamps: list[str]) -> int:
@@ -43,9 +42,7 @@ def _summary(timestamps: list[str]) -> str:
     ),
 )
 def handle_log_cigarette(arguments: dict, ctx: ToolContext) -> str:
-    user_id = str(ctx.user_id)
-    with jsonstore.update(config.CIGARETTES_FILE, {}) as data:
-        timestamps = data.setdefault(user_id, [])
+    with CIGARETTES.update_for(ctx.user_id) as timestamps:
         timestamps.append(datetime.now(UTC).isoformat())
         summary = _summary(timestamps)
     return f"Logged. {summary}"
@@ -56,7 +53,7 @@ def handle_log_cigarette(arguments: dict, ctx: ToolContext) -> str:
     description="Get the user's cigarette counts: how many they've logged today and in total (all-time).",
 )
 def handle_get_cigarette_count(arguments: dict, ctx: ToolContext) -> str:
-    timestamps = _load().get(str(ctx.user_id), [])
+    timestamps = CIGARETTES.get(ctx.user_id)
     if not timestamps:
         return "No cigarettes logged yet."
     return _summary(timestamps)
@@ -71,6 +68,5 @@ def handle_get_cigarette_count(arguments: dict, ctx: ToolContext) -> str:
     ),
 )
 def handle_reset_cigarette_count(arguments: dict, ctx: ToolContext) -> str:
-    with jsonstore.update(config.CIGARETTES_FILE, {}) as data:
-        data.pop(str(ctx.user_id), None)
+    CIGARETTES.forget(ctx.user_id)
     return "Cigarette count reset to 0."

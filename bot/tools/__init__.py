@@ -28,7 +28,7 @@ from importlib import import_module
 
 import discord
 
-from .. import permissions
+from .. import config, permissions
 
 log = logging.getLogger("discord-llm-bot.tools")
 
@@ -76,8 +76,16 @@ def register(
     required: list[str] | None = None,
     owner_only: bool = False,
     required_role: str | None = None,
+    household: bool = False,
 ) -> None:
-    """Add one tool to the registry, building its OpenAI function schema."""
+    """Add one tool to the registry, building its OpenAI function schema.
+
+    `household=True` is shorthand for required_role=config.HOUSEHOLD_ROLE_NAME.
+    Four tool modules used to each declare their own `_HOUSEHOLD` constant
+    with an identical comment above it, which is four copies to keep in
+    step; the gate belongs in the registry that enforces it."""
+    if household:
+        required_role = required_role or config.HOUSEHOLD_ROLE_NAME
     if name in _REGISTRY:
         raise ValueError(f"Duplicate tool name registered: {name!r}")
     parameters: dict = {"type": "object", "properties": properties or {}}
@@ -100,11 +108,12 @@ def tool(
     required: list[str] | None = None,
     owner_only: bool = False,
     required_role: str | None = None,
+    household: bool = False,
 ):
     """Decorator form of register(), so a tool is one self-contained function."""
 
     def decorate(handler: Handler) -> Handler:
-        register(name, description, handler, properties, required, owner_only, required_role)
+        register(name, description, handler, properties, required, owner_only, required_role, household)
         return handler
 
     return decorate
@@ -169,7 +178,16 @@ def _handle_no_action(arguments: dict, ctx: ToolContext) -> str:
 
 
 # Tool modules, imported for their @tool registrations. Add new tools here.
-_TOOL_MODULES = ("reminders", "calendar", "kasa", "cigarettes", "todos", "groceries", "geofence_admin")
+_TOOL_MODULES = (
+    "reminders",
+    "calendar",
+    "kasa",
+    "cigarettes",
+    "todos",
+    "groceries",
+    "geofence_admin",
+    "users_admin",
+)
 
 for _module in _TOOL_MODULES:
     import_module(f"{__name__}.{_module}")

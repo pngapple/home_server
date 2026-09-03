@@ -11,12 +11,30 @@ routes and calls serve().
 """
 
 import logging
+import os
 
 from aiohttp import web
 
 log = logging.getLogger("discord-llm-bot.webserver")
 
 _runners: list[web.AppRunner] = []
+
+# Rendered page source, keyed by absolute path. The dashboards' HTML used to
+# live in a triple-quoted string inside each server module — 311 of
+# llm_status_server.py's 384 lines and 285 of cigboard/server.py's 322 —
+# which meant no syntax highlighting, no formatter, and a diff full of markup
+# whenever the Python around it changed. Read once and held, same as a module
+# constant was.
+_pages: dict[str, str] = {}
+
+
+def page(module_file: str, name: str) -> str:
+    """Load `static/<name>` from the package `module_file` belongs to."""
+    path = os.path.join(os.path.dirname(os.path.abspath(module_file)), "static", name)
+    if path not in _pages:
+        with open(path, encoding="utf-8") as f:
+            _pages[path] = f.read()
+    return _pages[path]
 
 
 async def serve(name: str, port: int, routes, host: str = "127.0.0.1") -> web.AppRunner:

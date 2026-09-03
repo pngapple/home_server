@@ -25,9 +25,12 @@ from datetime import timedelta
 import discord
 import requests
 
-from . import config, jsonstore, permissions
+from . import config, permissions
+from .store import user_store
 
 log = logging.getLogger("discord-llm-bot.moderation")
+
+_STRIKES = user_store(config.MODERATION_STRIKES_FILE, list)
 
 _API_BASE = "https://openrouter.ai/api/v1"
 _session = requests.Session()
@@ -86,11 +89,9 @@ def _record_strike(user_id: int) -> int:
     config.MODERATION_STRIKE_WINDOW_DAYS, and returns the count still in the
     window (including this one)."""
     cutoff = time.time() - config.MODERATION_STRIKE_WINDOW_DAYS * 86400
-    with jsonstore.update(config.MODERATION_STRIKES_FILE, {}) as data:
-        key = str(user_id)
-        history = [t for t in data.get(key, []) if t > cutoff]
+    with _STRIKES.update_for(user_id) as history:
+        history[:] = [t for t in history if t > cutoff]
         history.append(time.time())
-        data[key] = history
         return len(history)
 
 

@@ -41,7 +41,6 @@ log = logging.getLogger("discord-llm-bot.tools.kasa")
 # permissions.is_admin), e.g. if even some residents shouldn't cut power to
 # shared equipment.
 _OWNER_ONLY = config.KASA_OWNER_ONLY
-_HOUSEHOLD = config.HOUSEHOLD_ROLE_NAME
 
 _DISCOVERY_TIMEOUT_S = 3
 _CACHE_TTL_SECONDS = 120
@@ -164,7 +163,7 @@ async def _get_status(host: str) -> bool:
         "user means."
     ),
     owner_only=_OWNER_ONLY,
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_list(arguments: dict, ctx: ToolContext) -> str:
     if error := _credentials_missing():
@@ -191,7 +190,7 @@ def handle_list(arguments: dict, ctx: ToolContext) -> str:
     },
     required=["device", "state"],
     owner_only=_OWNER_ONLY,
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_set_power(arguments: dict, ctx: ToolContext) -> str:
     if error := _credentials_missing():
@@ -219,7 +218,7 @@ def handle_set_power(arguments: dict, ctx: ToolContext) -> str:
     properties={"device": {"type": "string", "description": "The plug's name/alias."}},
     required=["device"],
     owner_only=_OWNER_ONLY,
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_get_status(arguments: dict, ctx: ToolContext) -> str:
     if error := _credentials_missing():

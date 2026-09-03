@@ -21,7 +21,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
-from . import config, jsonstore
+from . import config
+from .store import user_store
 
 log = logging.getLogger("discord-llm-bot.google_oauth")
 
@@ -89,26 +90,20 @@ def exchange_code(state: str, code: str) -> int | None:
     return discord_user_id
 
 
-def _load_all() -> dict:
-    return jsonstore.read(config.GOOGLE_CALENDAR_TOKENS_FILE, {})
-
-
-# These are live Google refresh tokens: create the file 0600 up front rather
-# than writing at the default umask and chmod-ing after, which leaves a
-# window where anyone on the box can read it.
-def _tokens():
-    """Read-modify-write context manager over the token file."""
-    return jsonstore.update(config.GOOGLE_CALENDAR_TOKENS_FILE, {}, mode=0o600)
+# These are live Google refresh tokens: the file is created 0600 up front
+# rather than written at the default umask and chmod-ed after, which would
+# leave a window where anyone on the box can read it. Registering it as a
+# UserKeyedStore is also what lets users.forget() revoke someone's stored
+# calendar grant along with the rest of their data.
+_TOKENS = user_store(config.GOOGLE_CALENDAR_TOKENS_FILE, dict, mode=0o600)
 
 
 def _save_credentials(discord_user_id: int, creds: Credentials) -> None:
-    with _tokens() as all_tokens:
-        all_tokens[str(discord_user_id)] = json.loads(creds.to_json())
+    _TOKENS.set(discord_user_id, json.loads(creds.to_json()))
 
 
 def _forget(discord_user_id: int) -> None:
-    with _tokens() as all_tokens:
-        all_tokens.pop(str(discord_user_id), None)
+    _TOKENS.forget(discord_user_id)
 
 
 def get_credentials(discord_user_id: int) -> Credentials | None:
@@ -117,8 +112,8 @@ def get_credentials(discord_user_id: int) -> Credentials | None:
     settings, refresh token expired). A dead grant is dropped so the caller's
     "not connected, send them a link" path takes over instead of the same
     doomed refresh being retried on every message."""
-    raw = _load_all().get(str(discord_user_id))
-    if raw is None:
+    raw = _TOKENS.get(discord_user_id)
+    if not raw:
         return None
 
     creds = Credentials.from_authorized_user_info(raw, SCOPES)
@@ -134,4 +129,4 @@ def get_credentials(discord_user_id: int) -> Credentials | None:
 
 
 def is_connected(discord_user_id: int) -> bool:
-    return str(discord_user_id) in _load_all()
+    return bool(_TOKENS.get(discord_user_id))

@@ -27,15 +27,14 @@ import logging
 import os
 from datetime import UTC, datetime
 
-from .. import config, jsonstore
-from ..discord_client import client
+from .. import config, jsonstore, notify, store
+from ..store import user_store
 from . import ToolContext, todos, tool
 
 log = logging.getLogger("discord-llm-bot.tools.reminders")
 
-# A household tool — gated to config.HOUSEHOLD_ROLE_NAME (see permissions.py)
-# so randoms in the server/DMs can't touch it.
-_HOUSEHOLD = config.HOUSEHOLD_ROLE_NAME
+# Each resident's last-seen arrive/leave event.
+GEOFENCE_STATE = user_store(config.GEOFENCE_STATE_FILE, str)
 
 TRIGGERS = ("arrive", "leave")
 
@@ -56,14 +55,6 @@ def _remove(reminder_id: str) -> None:
 
 def _get(reminder_id: str) -> dict | None:
     return next((r for r in load_reminders() if r.get("id") == reminder_id), None)
-
-
-async def _dm(user_id: int, text: str) -> None:
-    try:
-        user = await client.fetch_user(user_id)
-        await user.send(text)
-    except Exception:
-        log.exception("Failed to DM user %s", user_id)
 
 
 def parse_due_at(when_iso: str) -> datetime | None:
@@ -88,14 +79,14 @@ def schedule_reminder(reminder: dict) -> None:
     delay = max(0.0, (due_at - datetime.now(UTC)).total_seconds())
     # Tool handlers run in a worker thread (app.py hands ask_llm to
     # asyncio.to_thread), so there's no running loop here to create_task on —
-    # hand the coroutine to the Discord client's loop explicitly. This is
-    # also safe when called from the loop thread itself, as on_ready does.
-    asyncio.run_coroutine_threadsafe(fire_after(reminder, delay), client.loop)
+    # notify.from_loop hands the coroutine to the client's loop. Also safe
+    # when called from the loop thread itself, as on_ready does.
+    notify.from_loop(fire_after(reminder, delay))
 
 
 async def fire_after(reminder: dict, delay: float) -> None:
     await asyncio.sleep(delay)
-    await _dm(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
+    await notify.send_dm(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
     _remove(reminder.get("id"))
 
 
@@ -112,8 +103,8 @@ def reschedule_pending() -> None:
     # known arrive/leave state from disk so a recurring reminder that should
     # already be active (e.g. the server restarted while they were home)
     # doesn't just sit paused until the next geofence transition.
-    for user_id_str, last_event in jsonstore.read(config.GEOFENCE_STATE_FILE, {}).items():
-        sync_recurring_for_event(int(user_id_str), last_event)
+    for user_id, last_event in GEOFENCE_STATE.all().items():
+        sync_recurring_for_event(int(user_id), last_event)
 
 
 def pop_location_reminders(user_id: int, trigger: str) -> list[dict]:
@@ -152,12 +143,11 @@ def record_geofence_event(user_id: int, event: str) -> None:
     (reschedule_pending, which runs before any webhook fires this process)
     knows whether their recurring reminder should already be active. Called
     by geofence_server.py on every webhook."""
-    with jsonstore.update(config.GEOFENCE_STATE_FILE, {}) as state:
-        state[str(user_id)] = event
+    GEOFENCE_STATE.set(user_id, event)
 
 
 def _last_geofence_event(user_id: int) -> str | None:
-    return jsonstore.read(config.GEOFENCE_STATE_FILE, {}).get(str(user_id))
+    return GEOFENCE_STATE.get(user_id) or None
 
 
 async def _recurring_loop(reminder_id: str) -> None:
@@ -172,7 +162,7 @@ async def _recurring_loop(reminder_id: str) -> None:
                 if todo is None or todo.get("done"):
                     _remove(reminder_id)
                     return
-            await _dm(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
+            await notify.send_dm(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
             await asyncio.sleep(reminder["interval_minutes"] * 60)
     finally:
         _recurring_tasks.pop(reminder_id, None)
@@ -183,9 +173,9 @@ def _start_recurring(reminder: dict) -> None:
         return
     # Called both from tool handlers (a worker thread — see app.py's
     # asyncio.to_thread(ask_llm, ...)) and from geofence_server's webhook
-    # handler (already running on client.loop). run_coroutine_threadsafe is
-    # safe from either context, so it's used uniformly rather than branching.
-    _recurring_tasks[reminder["id"]] = asyncio.run_coroutine_threadsafe(_recurring_loop(reminder["id"]), client.loop)
+    # handler (already running on client.loop); notify.from_loop is safe
+    # from either, so it's used uniformly rather than branching.
+    _recurring_tasks[reminder["id"]] = notify.from_loop(_recurring_loop(reminder["id"]))
 
 
 def _stop_recurring(reminder_id: str) -> None:
@@ -209,6 +199,26 @@ def sync_recurring_for_event(user_id: int, event: str) -> None:
             _start_recurring(reminder)
         elif reminder.get("trigger") == opposite:
             _stop_recurring(reminder["id"])
+
+
+def _forget_user(user_id: int) -> bool:
+    """Drop every reminder belonging to `user_id`, and stop any recurring
+    loops of theirs still running. Registered with the store module so
+    users.forget() reaches reminders.json too — it's a flat list of records
+    with an author_id field rather than a dict keyed by user, so it can't be
+    a UserKeyedStore."""
+    removed = False
+    with jsonstore.update(config.REMINDERS_FILE, []) as reminders:
+        mine = [r for r in reminders if r.get("author_id") == user_id]
+        if mine:
+            removed = True
+            for reminder in mine:
+                _stop_recurring(reminder.get("id"))
+            reminders[:] = [r for r in reminders if r.get("author_id") != user_id]
+    return removed
+
+
+store.register_eraser("reminders.json", _forget_user)
 
 
 @tool(
@@ -237,7 +247,7 @@ def sync_recurring_for_event(user_id: int, event: str) -> None:
         },
     },
     required=["when_iso", "text"],
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_set_reminder(arguments: dict, ctx: ToolContext) -> str:
     when_iso = arguments["when_iso"]
@@ -286,7 +296,7 @@ def handle_set_reminder(arguments: dict, ctx: ToolContext) -> str:
         },
     },
     required=["trigger", "text"],
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_set_location_reminder(arguments: dict, ctx: ToolContext) -> str:
     trigger = arguments["trigger"]
@@ -335,7 +345,7 @@ def handle_set_location_reminder(arguments: dict, ctx: ToolContext) -> str:
         },
     },
     required=["todo_identifier", "interval_minutes", "trigger"],
-    required_role=_HOUSEHOLD,
+    household=True,
 )
 def handle_set_recurring_location_reminder(arguments: dict, ctx: ToolContext) -> str:
     trigger = arguments["trigger"]

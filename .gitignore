@@ -6,6 +6,18 @@ client_secret.json
 calendar_tokens.json
 llm_metrics.json
 deploy_notify.json
+moderation.json
+geofence_state.json
+
+# Per-user identity + settings (bot/users.py). Holds geofence webhook
+# secrets, so it's written 0600 and must never be committed.
+profiles.json
+
+# Metrics database (bot/db.py). WAL mode creates the -wal/-shm sidecars
+# alongside it; committing any of them causes trouble.
+llm_metrics.db
+llm_metrics.db-wal
+llm_metrics.db-shm
 cigarettes.json
 todos.json
 groceries.json

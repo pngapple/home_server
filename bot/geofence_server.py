@@ -8,20 +8,19 @@ Tailscale-only interface, same pattern as /calendar/oauth/callback and the
 other local dashboards (see /etc/nginx/sites-available/status). The phone
 needs Tailscale connected for the request to land.
 
-Each resident's phone sends its own secret (config.GEOFENCE_USERS maps
-secret -> Discord user id) rather than one shared secret for the household —
+Each resident's phone sends its own secret (stored on their profile — see
+users.by_geofence_secret) rather than one shared secret for the household —
 that's what identifies whose arrive/leave event this is, so one resident
-getting home doesn't fire another resident's location reminders. Keep the
-secrets out of source control (.env, not committed).
+getting home doesn't fire another resident's location reminders. Keep
+profiles.json out of source control: it holds those secrets, and is written
+0600 for the same reason.
 """
 
-import hmac
 import logging
 
 from aiohttp import web
 
-from . import config, webserver
-from .discord_client import client
+from . import config, notify, users, webserver
 from .tools import reminders
 
 log = logging.getLogger("discord-llm-bot.geofence_server")
@@ -30,31 +29,8 @@ _ARRIVE_MESSAGE = "🏠 Welcome home."
 _LEAVE_MESSAGE = "🚪 Left home."
 
 
-async def _notify(user_id: int, text: str) -> None:
-    try:
-        user = await client.fetch_user(user_id)
-        await user.send(text)
-    except Exception:
-        log.exception("Failed to deliver geofence notification to user %s", user_id)
-
-
-def _match_user(secret: bytes) -> int | None:
-    """Which resident this secret belongs to, or None if it matches nobody.
-    Checks every configured secret rather than stopping at the first
-    mismatch, so response timing can't be used to narrow down which secret
-    (if any) is close to correct."""
-    matched = None
-    for candidate_secret, candidate_user_id in config.GEOFENCE_USERS.items():
-        # Compare as bytes: hmac.compare_digest raises TypeError on str
-        # inputs containing non-ASCII, which an arbitrary query string can
-        # easily have.
-        if hmac.compare_digest(secret, candidate_secret.encode()):
-            matched = candidate_user_id
-    return matched
-
-
 async def handle_webhook(request: web.Request) -> web.Response:
-    if not config.GEOFENCE_USERS:
+    if not users.any_geofence_users():
         return web.Response(status=503, text="Geofence webhook not configured.")
 
     params = dict(request.query)
@@ -64,22 +40,23 @@ async def handle_webhook(request: web.Request) -> web.Response:
         except Exception:
             log.warning("Ignoring unparseable geofence POST body", exc_info=True)
 
-    user_id = _match_user(str(params.get("secret", "")).encode())
-    if user_id is None:
+    profile = users.by_geofence_secret(str(params.get("secret", "")))
+    if profile is None:
         return web.Response(status=403, text="Bad secret.")
+    user_id = profile.user_id
 
     trigger = params.get("event")
     if trigger not in ("arrive", "leave"):
         return web.Response(status=400, text="event must be 'arrive' or 'leave'.")
 
-    log.info("Geofence event: %s for user %s", trigger, user_id)
-    await _notify(user_id, _ARRIVE_MESSAGE if trigger == "arrive" else _LEAVE_MESSAGE)
+    log.info("Geofence event: %s for %s (%s)", trigger, profile.display_name, user_id)
+    await notify.send_dm(user_id, _ARRIVE_MESSAGE if trigger == "arrive" else _LEAVE_MESSAGE)
 
     reminders.record_geofence_event(user_id, trigger)
     reminders.sync_recurring_for_event(user_id, trigger)
 
     for reminder in reminders.pop_location_reminders(user_id, trigger):
-        await _notify(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
+        await notify.send_dm(reminder["author_id"], f"⏰ Reminder: {reminder['text']}")
 
     return web.Response(text="ok")
 

@@ -72,6 +72,10 @@ SERVICE_NAME = os.environ.get("SERVICE_NAME", "discord-llm-bot")
 TIMEZONE = os.environ.get("TIMEZONE", "America/Indiana/Indianapolis")
 LOCAL_TZ = ZoneInfo(TIMEZONE)
 
+# Per-user identity + settings (see users.py). Holds geofence webhook
+# secrets, so it's written 0600 like the calendar tokens below.
+PROFILES_FILE = os.environ.get("PROFILES_FILE", "profiles.json")
+
 REMINDERS_FILE = os.environ.get("REMINDERS_FILE", "reminders.json")
 
 # Per-user cigarette counter (see tools/cigarettes.py).
@@ -94,7 +98,19 @@ GOOGLE_OAUTH_SERVER_PORT = int(os.environ.get("GOOGLE_OAUTH_SERVER_PORT", "8788"
 # LLM metrics dashboard (bot/llm_status_server.py), reverse-proxied at /llm/
 # the same way the oauth callback and Netdata are — see sites-available/status.
 LLM_STATUS_SERVER_PORT = int(os.environ.get("LLM_STATUS_SERVER_PORT", "8791"))
+# Metrics are the one thing here that outgrew a JSON file: it was rewritten
+# in full on every LLM call, and its 200-entry cap meant history was lost
+# rather than merely unshown (see metrics.py and db.py). LLM_METRICS_FILE is
+# kept only as the migration source for scripts/migrate_metrics.py.
+METRICS_DB = os.environ.get("METRICS_DB", "llm_metrics.db")
 LLM_METRICS_FILE = os.environ.get("LLM_METRICS_FILE", "llm_metrics.json")
+# The period the dashboard's headline tiles and per-user call/token counts
+# cover. This used to be implicit — whatever fit in a 200-entry deque — so
+# it drifted with traffic; now it's a stated window over data that's all
+# still there. Spend figures stay all-time regardless.
+METRICS_WINDOW_DAYS = int(os.environ.get("METRICS_WINDOW_DAYS", "30"))
+# Calls older than this are deleted at startup, bounding the database.
+METRICS_RETENTION_DAYS = int(os.environ.get("METRICS_RETENTION_DAYS", "90"))
 
 # Cigarette leaderboard (see cigboard/), same local-only-server-behind-nginx
 # pattern as the LLM status dashboard above.
@@ -176,9 +192,15 @@ GEOFENCE_SERVER_PORT = int(os.environ.get("GEOFENCE_SERVER_PORT", "8793"))
 def _parse_geofence_users(raw: str) -> dict[str, int]:
     """GEOFENCE_USERS maps each resident's own webhook secret to their
     Discord user id — format 'secret1:discord_id1,secret2:discord_id2,...',
-    one entry per phone. Per-person secrets (rather than one shared secret)
-    are what let one resident's phone arriving/leaving only ever affect
-    their own reminders, never a housemate's — see geofence_server.py."""
+    one entry per phone.
+
+    DEPRECATED as the live source: secrets now live on the user's profile
+    (see users.py), so registering a phone takes effect immediately instead
+    of waiting for a !deploy restart to re-read this file. This is kept
+    purely so phones registered before that change keep working —
+    users.seed_geofence_from_env() copies anything still defined here into
+    the profile store at startup, after which GEOFENCE_USERS can be deleted
+    from .env entirely."""
     users: dict[str, int] = {}
     for entry in raw.split(","):
         entry = entry.strip()
