@@ -22,5 +22,9 @@ cigarettes.json
 todos.json
 groceries.json
 
+# What the bot has learned about each person (bot/lessons.py) — their own
+# stated preferences, so it's their data, not repo content.
+lessons.json
+
 # transient files from jsonstore.write()
 *.json.tmp

@@ -5,3 +5,6 @@ google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 python-kasa>=0.10
+
+# Test-only (see tests/, run with ./venv/bin/python -m pytest).
+pytest>=8.0

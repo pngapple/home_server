@@ -13,7 +13,7 @@ plain string) — the model then turns that into a natural-language reply, so
 it's fine for handlers to return short human-readable status/error strings
 rather than structured data.
 
-dispatch() enforces the `required` argument list before calling a handler,
+dispatch_result() enforces the `required` argument list before calling a handler,
 enforces `owner_only` for tools that shouldn't be drivable by anyone who can
 @mention the bot (see permissions.is_admin), and enforces `required_role`
 for tools gated to a specific Discord role (see permissions.py) — e.g. the
@@ -132,30 +132,69 @@ def get_tool_schemas(user_id: int, roles: frozenset[str]) -> list[dict]:
     ]
 
 
-def dispatch(name: str, arguments: dict, ctx: ToolContext) -> str:
+@dataclass(frozen=True)
+class ToolResult:
+    """A tool's outcome, split into the two audiences it has.
+
+    `content` is what the model sees, unchanged from what handlers have
+    always returned. `error` is for the episode log (see episodes.py) and is
+    None on success — it exists because the useful part of a failure was
+    being thrown away: dispatch() logged the traceback and handed the model
+    a flat "failed unexpectedly", so nothing downstream could tell a bug
+    apart from a permission gate doing its job.
+
+    The `raised:` prefix marks the one case that means a real defect. A
+    denial or a missing argument is the system working as designed.
+    """
+
+    content: str
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+def dispatch_result(name: str, arguments: dict, ctx: ToolContext) -> ToolResult:
     entry = _REGISTRY.get(name)
     if entry is None:
-        return f"Error: no such tool '{name}'."
+        return ToolResult(f"Error: no such tool '{name}'.", "unknown_tool")
 
     if entry.owner_only and not permissions.is_admin(ctx.user_id, ctx.roles):
         log.warning("Blocked owner-only tool '%s' for user %s", name, ctx.user_id)
-        return f"Error: '{name}' is restricted to an administrator. Tell the user they aren't authorized to do that."
+        return ToolResult(
+            f"Error: '{name}' is restricted to an administrator. Tell the user they aren't authorized to do that.",
+            "denied: owner_only",
+        )
 
     if entry.required_role and entry.required_role not in ctx.roles:
         log.warning("Blocked '%s' for user %s missing role %r", name, ctx.user_id, entry.required_role)
-        return f"Error: '{name}' requires the '{entry.required_role}' role. Tell the user they aren't authorized to do that."
+        return ToolResult(
+            f"Error: '{name}' requires the '{entry.required_role}' role. Tell the user they aren't authorized to do that.",
+            f"denied: role {entry.required_role!r}",
+        )
 
     # The model routinely omits arguments it declared as required, so check
     # here once rather than in every handler. Empty strings count as missing.
     missing = [key for key in entry.required if not arguments.get(key)]
     if missing:
-        return f"Error: missing required argument(s) for {name}: {', '.join(missing)}."
+        return ToolResult(
+            f"Error: missing required argument(s) for {name}: {', '.join(missing)}.",
+            f"missing_args: {', '.join(missing)}",
+        )
 
     try:
-        return entry.handler(arguments, ctx)
-    except Exception:
+        return ToolResult(entry.handler(arguments, ctx))
+    except Exception as exc:
         log.exception("Tool '%s' raised while handling arguments=%r", name, arguments)
-        return f"Error: tool '{name}' failed unexpectedly."
+        return ToolResult(
+            f"Error: tool '{name}' failed unexpectedly.", f"raised: {type(exc).__name__}: {exc}"
+        )
+
+
+def dispatch(name: str, arguments: dict, ctx: ToolContext) -> str:
+    """Just the model-facing half, for callers that don't record episodes."""
+    return dispatch_result(name, arguments, ctx).content
 
 
 # A no-op the model can pick when nothing else applies. llm.py forces
@@ -187,6 +226,7 @@ _TOOL_MODULES = (
     "groceries",
     "geofence_admin",
     "users_admin",
+    "preferences",
 )
 
 for _module in _TOOL_MODULES:

@@ -58,7 +58,53 @@ CREATE TABLE IF NOT EXISTS opening_balance (
     cost_usd REAL NOT NULL,
     PRIMARY KEY (source, user_id)
 );
+
+-- One row per user turn: what was asked, what the bot decided to do about
+-- it, and how that turned out. The `calls` table above answers "what did
+-- this cost"; this one answers "did it work", which is what the reflection
+-- pass reads. See episodes.py.
+CREATE TABLE IF NOT EXISTS episodes (
+    id           INTEGER PRIMARY KEY,
+    ts           REAL    NOT NULL,
+    -- The Discord ids for the user's message and our reply to it. reply_id
+    -- is filled in after the fact (app.py only learns it once the reply is
+    -- actually sent) and is what a 👍/👎 reaction is resolved through.
+    message_id   INTEGER,
+    reply_id     INTEGER,
+    channel_id   INTEGER,
+    user_id      INTEGER,
+    user_name    TEXT,
+    user_text    TEXT    NOT NULL,
+    outcome      TEXT    NOT NULL,
+    detail       TEXT,
+    model        TEXT,
+    iterations   INTEGER NOT NULL DEFAULT 0,
+    duration_s   REAL    NOT NULL DEFAULT 0.0,
+    -- JSON array of {name, ok, error} — the decision trace for the turn.
+    tools_called TEXT    NOT NULL DEFAULT '[]',
+    reply        TEXT,
+    -- -1/+1 once someone reacts, NULL while unlabelled. feedback_source
+    -- says where the label came from ("reaction" or "rephrase") — an
+    -- inferred signal is much weaker than a deliberate 👎 and the two must
+    -- stay tellable apart, both for weighting and for judging whether the
+    -- rephrase heuristic earns its keep.
+    feedback        INTEGER,
+    feedback_source TEXT
+);
+CREATE INDEX IF NOT EXISTS episodes_ts      ON episodes (ts DESC);
+CREATE INDEX IF NOT EXISTS episodes_outcome ON episodes (outcome, ts DESC);
+CREATE INDEX IF NOT EXISTS episodes_reply   ON episodes (reply_id);
+CREATE INDEX IF NOT EXISTS episodes_message ON episodes (message_id);
 """
+
+# Columns added after a database was first created. CREATE TABLE IF NOT
+# EXISTS covers a new table but silently does nothing for an existing one
+# with an older shape, so anything added to a live table has to be listed
+# here too. Keep both in step: the schema above is what a fresh database
+# gets, this is what an old one is brought up to.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "episodes": {"feedback_source": "TEXT"},
+}
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -74,8 +120,23 @@ def connect(path: str | None = None) -> sqlite3.Connection:
         _conn.execute("PRAGMA synchronous=NORMAL")
         _conn.execute("PRAGMA busy_timeout=5000")
         _conn.executescript(_SCHEMA)
+        _migrate(_conn)
         _conn.commit()
     return _conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current column set. Idempotent,
+    and cheap enough to run on every open — PRAGMA table_info is a read of
+    already-parsed schema, not a table scan."""
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table isn't there yet; _SCHEMA just created it in full
+        for name, decl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                log.info("Added column %s.%s", table, name)
 
 
 @contextmanager

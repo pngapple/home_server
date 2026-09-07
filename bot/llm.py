@@ -14,9 +14,9 @@ from datetime import datetime, timedelta
 
 import requests
 
-from . import config, metrics
+from . import config, episodes, lessons, metrics
 from .discord_client import display_name
-from .tools import ToolContext, dispatch, get_tool_schemas
+from .tools import ToolContext, dispatch_result, get_tool_schemas
 
 log = logging.getLogger("discord-llm-bot.llm")
 
@@ -183,7 +183,11 @@ def _post_with_retry(payload: dict, timeout: int) -> requests.Response:
     raise AssertionError("unreachable")  # the final attempt always returns or raises
 
 
-def _system_prompt() -> str:
+def _system_prompt(user_id: int | None = None, tool_names: frozenset[str] = frozenset()) -> str:
+    """The base prompt, the date table, and whatever the bot has learned
+    that applies to this particular turn (see lessons.py). The learned block
+    goes last so it reads as the most recent, most specific context, and is
+    omitted entirely when there's nothing to say."""
     now_local = datetime.now(config.LOCAL_TZ)
     # Small/fast models are unreliable at mental date arithmetic (e.g.
     # miscounting "next Monday" across a month boundary). Handing over a
@@ -192,30 +196,44 @@ def _system_prompt() -> str:
     upcoming_dates = "\n".join(
         f"{(now_local + timedelta(days=i)):%A, %Y-%m-%d}" + (" (today)" if i == 0 else "") for i in range(14)
     )
-    return (
+    prompt = (
         f"{config.SYSTEM_PROMPT}\n\n"
         f"Current local date/time: {now_local:%A, %Y-%m-%d %H:%M} ({config.TIMEZONE}).\n\n"
         f"Upcoming dates for reference (use these directly instead of "
         f"calculating weekdays yourself):\n{upcoming_dates}"
     )
+    if user_id is None:
+        return prompt
+    try:
+        learned = lessons.render(lessons.for_prompt(user_id, tool_names))
+    except Exception:
+        # A prompt without its learned notes is worse but still works; one
+        # that can't be built at all costs the user their reply.
+        log.exception("Failed to load lessons for user %s", user_id)
+        return prompt
+    return f"{prompt}\n\n{learned}" if learned else prompt
 
 
-def _run_tool_calls(tool_calls: list[dict], ctx: ToolContext) -> list[dict]:
+def _run_tool_calls(tool_calls: list[dict], ctx: ToolContext, recorder: episodes.Recorder) -> list[dict]:
     results = []
     for call in tool_calls:
         name = call["function"]["name"]
+        malformed = None
         try:
             arguments = json.loads(call["function"]["arguments"] or "{}")
         except json.JSONDecodeError:
             log.warning("Bad tool arguments JSON from model for %s: %r", name, call["function"]["arguments"])
-            arguments = {}
+            malformed, arguments = "bad_arguments_json", {}
         if not isinstance(arguments, dict):
             log.warning("Non-object tool arguments from model for %s: %r", name, arguments)
-            arguments = {}
+            malformed, arguments = "non_object_arguments", {}
         log.info("Tool call: %s(%r)", name, arguments)
-        results.append(
-            {"role": "tool", "tool_call_id": call["id"], "content": dispatch(name, arguments, ctx)}
-        )
+        result = dispatch_result(name, arguments, ctx)
+        # Malformed arguments are worth keeping even when the handler coped,
+        # since a model that can't emit valid JSON for a schema is usually
+        # telling you the schema needs rewording.
+        recorder.tool_call(name, result.error or malformed)
+        results.append({"role": "tool", "tool_call_id": call["id"], "content": result.content})
     return results
 
 
@@ -230,11 +248,44 @@ def ask_llm(message, user_text: str, roles: frozenset[str] = frozenset()) -> str
     conversation_history = history_for(ctx.channel_id, user_id)
     tool_schemas = get_tool_schemas(ctx.user_id, ctx.roles)
 
-    messages = [{"role": "system", "content": _system_prompt()}]
+    # Every return below goes through recorder.finish(), and the whole loop
+    # is wrapped so a raise does too — a turn should not be able to end
+    # without leaving a record of how it ended. See episodes.py.
+    recorder = episodes.Recorder(
+        user_text=user_text,
+        message_id=getattr(message, "id", None),
+        channel_id=ctx.channel_id,
+        user_id=user_id,
+        user_name=user_name,
+        model=config.OPENROUTER_MODEL,
+    )
+
+    tool_names = frozenset(schema["function"]["name"] for schema in tool_schemas)
+    messages = [{"role": "system", "content": _system_prompt(user_id, tool_names)}]
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_text})
 
+    try:
+        return _run_turn(messages, tool_schemas, ctx, recorder, conversation_history, user_text)
+    except Exception as exc:
+        recorder.finish(episodes.Outcome.LLM_ERROR, detail=f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _run_turn(
+    messages: list[dict],
+    tool_schemas: list[dict],
+    ctx: ToolContext,
+    recorder: episodes.Recorder,
+    conversation_history: deque,
+    user_text: str,
+) -> str:
+    """The chat/tool loop itself, split out so ask_llm's wrapper can record
+    an exception without burying the loop in an extra indent level."""
+    user_id, user_name = recorder.user_id, recorder.user_name
+
     for i in range(MAX_TOOL_ITERATIONS):
+        recorder.iterations = i + 1
         # Force the first decision on a fresh message through actual
         # tool-calling (real tool or the no_action_needed no-op) instead of
         # letting the model silently free-text a claimed result. Once that
@@ -265,7 +316,9 @@ def ask_llm(message, user_text: str, roles: frozenset[str] = frozenset()) -> str
             tool_calls = reply_message.get("tool_calls")
             if not tool_calls:
                 log.error("Model ignored forced tool_choice twice for channel %s", ctx.channel_id)
-                return "Sorry, something went wrong confirming that — can you try again?"
+                reply = "Sorry, something went wrong confirming that — can you try again?"
+                recorder.finish(episodes.Outcome.FORCED_TOOL_MISS, reply=reply)
+                return reply
 
         if not tool_calls:
             # An empty content field would otherwise make the bot silently
@@ -273,10 +326,19 @@ def ask_llm(message, user_text: str, roles: frozenset[str] = frozenset()) -> str
             reply = reply_message.get("content") or "(no reply)"
             conversation_history.append({"role": "user", "content": user_text})
             conversation_history.append({"role": "assistant", "content": reply})
+            # The user got an answer either way, but a turn where a handler
+            # blew up is not a success — it's the case where the model
+            # smooths over a real bug in prose, which is exactly what needs
+            # to be findable later.
+            recorder.finish(
+                episodes.Outcome.TOOL_ERROR if recorder.raised() else episodes.Outcome.OK, reply=reply
+            )
             return reply
 
         messages.append(reply_message)
-        messages.extend(_run_tool_calls(tool_calls, ctx))
+        messages.extend(_run_tool_calls(tool_calls, ctx, recorder))
 
     log.warning("Hit max tool iterations (%d) for channel %s", MAX_TOOL_ITERATIONS, ctx.channel_id)
-    return "Sorry, I got stuck juggling tools on that one — try rephrasing?"
+    reply = "Sorry, I got stuck juggling tools on that one — try rephrasing?"
+    recorder.finish(episodes.Outcome.MAX_ITERATIONS, reply=reply)
+    return reply

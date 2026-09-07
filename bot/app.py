@@ -31,7 +31,9 @@ from . import (
     claude_bridge,
     config,
     deploy,
+    episodes,
     geofence_server,
+    lessons,
     llm_status_server,
     metrics,
     moderation,
@@ -86,10 +88,17 @@ def chunk(text: str, limit: int = config.DISCORD_MESSAGE_LIMIT):
         yield text
 
 
-async def send_text(channel, text: str) -> None:
+async def send_text(channel, text: str):
+    """Send `text`, split across Discord's per-message cap. Returns the
+    first message actually sent — the one a reader's 👍/👎 lands on, and so
+    the one an episode is keyed to (see episodes.attach_reply) — or None if
+    there was nothing but whitespace to send."""
+    first = None
     for part in chunk(text):
         if part.strip():
-            await channel.send(part)
+            sent = await channel.send(part)
+            first = first or sent
+    return first
 
 
 def _thread_title(prompt: str) -> str:
@@ -138,6 +147,20 @@ async def on_ready():
     except Exception:
         log.exception("Failed to prune old metrics rows")
 
+    # Same policy for the per-turn outcome log next to it (see episodes.py).
+    try:
+        episodes.prune(config.EPISODE_RETENTION_DAYS)
+    except Exception:
+        log.exception("Failed to prune old episodes")
+
+    # Learned notes age out too, and for a sharper reason: every one of them
+    # is spent from a fixed prompt budget, so a stale lesson isn't merely
+    # clutter — it's crowding out a current one (see lessons.py).
+    try:
+        lessons.prune()
+    except Exception:
+        log.exception("Failed to prune stale lessons")
+
     # Give a profile to anyone who has data here but hasn't messaged since
     # profiles existed, so the leaderboard and shared grocery list show real
     # names immediately rather than placeholders until each person speaks.
@@ -167,6 +190,49 @@ async def _announce_restart() -> None:
         await channel.send("✅ Back online.")
     except Exception:
         log.exception("Failed to announce restart in channel %s", channel_id)
+
+
+# The reactions that count as feedback on a reply. Anything else is left
+# alone — people react to bot messages for all sorts of reasons.
+_FEEDBACK_EMOJI = {"👍": 1, "👎": -1}
+
+# Skin-tone modifiers and the emoji variation selector, stripped so 👍🏽 and
+# 👍️ label a reply the same way a bare 👍 does.
+_EMOJI_MODIFIERS = re.compile("[🏻-🏿️]")
+
+
+def _feedback_value(emoji) -> int | None:
+    return _FEEDBACK_EMOJI.get(_EMOJI_MODIFIERS.sub("", str(emoji)))
+
+
+@client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    """A 👍/👎 on one of the bot's replies labels the turn behind it (see
+    episodes.py).
+
+    Raw, rather than on_reaction_add, because the non-raw event only fires
+    for messages in the gateway's cache — which excludes everything sent
+    before the last restart, i.e. exactly the older replies someone is most
+    likely to be scrolling back to react to."""
+    if client.user is not None and payload.user_id == client.user.id:
+        return
+    value = _feedback_value(payload.emoji)
+    if value is None:
+        return
+    if await asyncio.to_thread(episodes.record_feedback, payload.message_id, value):
+        log.info("Feedback %+d on reply %s from user %s", value, payload.message_id, payload.user_id)
+
+
+@client.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    """Taking a reaction back withdraws the label — a misclick shouldn't
+    permanently teach the wrong thing."""
+    if client.user is not None and payload.user_id == client.user.id:
+        return
+    value = _feedback_value(payload.emoji)
+    if value is None:
+        return
+    await asyncio.to_thread(episodes.clear_feedback, payload.message_id, value)
 
 
 @client.event
@@ -350,8 +416,29 @@ async def _run_claude_bridge(channel, prompt: str, user_id: int, user_name: str)
 async def _handle_chat(message: discord.Message, text: str, roles: frozenset[str]) -> None:
     verdict = await moderation.enforce(message, roles, text)
     if verdict is not None:
+        # Recorded here rather than in ask_llm because a refused message
+        # never reaches it. Not counted as a failure (see episodes.FAILURES)
+        # — a refusal is moderation working.
+        await asyncio.to_thread(
+            episodes.record,
+            user_text=text,
+            outcome=episodes.Outcome.MODERATED,
+            message_id=message.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            user_name=display_name(message.author),
+            reply=verdict,
+        )
         await message.channel.send(verdict)
         return
+
+    # Checked before this message is answered, while the previous turn is
+    # still the most recent one: someone re-asking the same thing within a
+    # minute or two is the most common negative signal there is, and almost
+    # nobody bothers to thumbs-down. See episodes.note_possible_rephrase.
+    await asyncio.to_thread(
+        episodes.note_possible_rephrase, message.author.id, message.channel.id, text
+    )
 
     async with message.channel.typing():
         try:
@@ -361,10 +448,18 @@ async def _handle_chat(message: discord.Message, text: str, roles: frozenset[str
             # channel, reminder timer and local HTTP server in this process.
             reply = await asyncio.to_thread(ask_llm, message, text, roles)
         except Exception:
+            # ask_llm has already recorded this as an llm_error episode on
+            # its way out — all that's left is telling the user.
             log.exception("LLM call failed")
             await message.channel.send(_LLM_ERROR)
             return
-    await send_text(message.channel, reply)
+
+    sent = await send_text(message.channel, reply)
+    if sent is not None:
+        # Only knowable out here: ask_llm records the turn before the reply
+        # exists as a Discord message. This is what lets a reaction on that
+        # message be resolved back to the turn it judges.
+        await asyncio.to_thread(episodes.attach_reply, message.id, sent.id)
 
 
 def main():

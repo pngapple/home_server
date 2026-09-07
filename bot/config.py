@@ -112,6 +112,28 @@ METRICS_WINDOW_DAYS = int(os.environ.get("METRICS_WINDOW_DAYS", "30"))
 # Calls older than this are deleted at startup, bounding the database.
 METRICS_RETENTION_DAYS = int(os.environ.get("METRICS_RETENTION_DAYS", "90"))
 
+# Per-turn outcome log (bot/episodes.py): what was asked, what the bot
+# decided to do, and whether it worked. Bounded at startup the same way the
+# metrics rows above are, but kept longer — the point of the log is to spot
+# a pattern and then confirm a fix actually held, and a 90-day window makes
+# "is this still happening?" unanswerable for anything seasonal.
+EPISODE_RETENTION_DAYS = int(os.environ.get("EPISODE_RETENTION_DAYS", "180"))
+
+# Learned notes injected into the system prompt (see bot/lessons.py) — the
+# part of this bot that actually gets better over time rather than just
+# recording that it didn't.
+LESSONS_FILE = os.environ.get("LESSONS_FILE", "lessons.json")
+# A lesson nobody has restated or acted on in this long is dropped. Without
+# an expiry the prompt only ever grows, and a stale note is worse than no
+# note — it makes a small model confidently wrong.
+LESSON_TTL_DAYS = int(os.environ.get("LESSON_TTL_DAYS", "120"))
+# Hard cap on how much learned text can reach the prompt in one turn.
+# Unbounded context makes a small model *worse*, so this is a real budget,
+# not a safety valve: lessons compete for it, newest-reinforced first.
+LESSON_PROMPT_BUDGET_CHARS = int(os.environ.get("LESSON_PROMPT_BUDGET_CHARS", "1200"))
+# Per-person cap, so one chatty user can't crowd the file.
+MAX_LESSONS_PER_USER = int(os.environ.get("MAX_LESSONS_PER_USER", "40"))
+
 # Cigarette leaderboard (see cigboard/), same local-only-server-behind-nginx
 # pattern as the LLM status dashboard above.
 CIGBOARD_SERVER_PORT = int(os.environ.get("CIGBOARD_SERVER_PORT", "8792"))
