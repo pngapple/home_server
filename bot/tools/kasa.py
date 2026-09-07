@@ -25,7 +25,7 @@ import threading
 import time
 from typing import NamedTuple
 
-from kasa import Discover
+from kasa import AuthenticationError, Discover
 
 from .. import config
 from . import ToolContext, tool
@@ -56,6 +56,11 @@ class Plug(NamedTuple):
 # running on another tool worker thread never observes a half-filled cache.
 _CACHE: dict[str, Plug] = {}
 _CACHE_TS = 0.0
+# Hosts that answered the discovery broadcast but whose update() failed, so
+# we know their alias only as "something is there". Kept so we never tell
+# someone a plug doesn't exist when we actually saw it and just couldn't
+# read it.
+_UNREACHABLE: tuple[str, ...] = ()
 # Serializes discovery so two concurrent tool calls don't each pay for a
 # full LAN scan.
 _REFRESH_LOCK = threading.Lock()
@@ -68,7 +73,47 @@ def _normalize(s: str) -> str:
     return s.strip().casefold().replace("’", "'").replace("‘", "'")
 
 
-async def _discover_all() -> list[Plug]:
+async def _connect(host: str):
+    return await Discover.discover_single(host, username=config.KASA_USERNAME, password=config.KASA_PASSWORD)
+
+
+async def _connect_updated(host: str):
+    """A fresh, populated connection to `host`. The caller disconnects it.
+
+    The KLAP handshake fails intermittently with "Device response did not
+    match our challenge", which reads like bad credentials but isn't — it's
+    the same plug, same credentials, working seconds either side. The
+    failure is stuck in that one connection, not in the device: retrying
+    update() on the same object never recovers it (measured: seven attempts
+    over 61s all failed), while a new connection succeeds immediately. So
+    the retry has to be a reconnect. python-kasa won't do it for us — it
+    resets the transport and then deliberately re-raises AuthenticationError
+    without retrying (iotprotocol._query).
+    """
+    for last in (False, True):
+        dev = await _connect(host)
+        try:
+            await dev.update()
+            return dev
+        except AuthenticationError:
+            await dev.disconnect()
+            if last:
+                raise
+            log.info("Kasa handshake with %s failed; reconnecting once", host)
+        except Exception:
+            await dev.disconnect()
+            raise
+
+
+async def _read_plug(host: str) -> Plug:
+    dev = await _connect_updated(host)
+    try:
+        return Plug(host, dev.alias, dev.is_on)
+    finally:
+        await dev.disconnect()
+
+
+async def _discover_all() -> tuple[list[Plug], list[str]]:
     found = await Discover.discover(
         username=config.KASA_USERNAME,
         password=config.KASA_PASSWORD,
@@ -79,25 +124,39 @@ async def _discover_all() -> list[Plug]:
     # authenticated update() call. That call is per-device and can fail on
     # its own (a device that rejects the shared credentials, one that's
     # dropped off wifi mid-scan), so keep the rest of the scan rather than
-    # losing every plug to one bad one.
-    plugs = []
+    # losing every plug to one bad one. Report the ones that dropped out
+    # instead of discarding them: to a caller, "not in the scan" and "not on
+    # the network" are very different answers.
+    plugs, unreachable = [], []
     for host, dev in found.items():
         try:
             await dev.update()
+            plugs.append(Plug(host, dev.alias, dev.is_on))
+            continue
+        except AuthenticationError:
+            log.info("Kasa handshake with %s failed during discovery", host)
         except Exception:
             log.warning("Skipping Kasa device at %s: update failed", host, exc_info=True)
-        else:
-            plugs.append(Plug(host, dev.alias, dev.is_on))
+            unreachable.append(host)
+            continue
         finally:
             await dev.disconnect()
-    return plugs
+        # The handshake is stuck on the connection discovery handed us, and
+        # only a new one clears it — see _connect_updated.
+        try:
+            plugs.append(await _read_plug(host))
+        except Exception:
+            log.warning("Skipping Kasa device at %s: update failed after reconnect", host, exc_info=True)
+            unreachable.append(host)
+    return plugs, unreachable
 
 
 def _refresh_cache() -> None:
-    global _CACHE, _CACHE_TS
+    global _CACHE, _CACHE_TS, _UNREACHABLE
     with _REFRESH_LOCK:
-        plugs = asyncio.run(_discover_all())
+        plugs, unreachable = asyncio.run(_discover_all())
         _CACHE = {_normalize(p.alias): p for p in plugs}
+        _UNREACHABLE = tuple(unreachable)
         _CACHE_TS = time.time()
 
 
@@ -118,17 +177,30 @@ def _find(name: str) -> Plug | None:
     if not fresh:
         _refresh_cache()
     hit = _lookup(name)
-    if hit is None and fresh:
-        # Might be new/renamed since the cache was built — one retry, but
-        # only if we haven't just scanned (each scan costs a LAN broadcast
-        # plus an authenticated update() per device).
+    if hit is None and (fresh or _UNREACHABLE):
+        # Either the cache predates a rename, or the scan we just did lost a
+        # device to a failed handshake and the plug being asked for is that
+        # device. Both are worth one more scan (each costs a LAN broadcast
+        # plus an authenticated update() per device, so only one) before
+        # concluding there's no such plug.
         _refresh_cache()
         hit = _lookup(name)
     return hit
 
 
 def _known_plugs_str() -> str:
-    return ", ".join(p.alias for p in _CACHE.values()) or "(none found)"
+    known = ", ".join(p.alias for p in _CACHE.values()) or "(none found)"
+    if _UNREACHABLE:
+        # Without this the model confidently tells the user the plug doesn't
+        # exist and asks whether it's offline or renamed, when in fact we saw
+        # it and only failed to read it.
+        known += (
+            f". Note: {len(_UNREACHABLE)} more device(s) answered discovery but "
+            f"couldn't be read ({', '.join(_UNREACHABLE)}), so their names are "
+            "unknown — the requested plug may be one of them. Say the plug "
+            "couldn't be reached, not that it doesn't exist"
+        )
+    return known
 
 
 def _credentials_missing() -> str | None:
@@ -138,18 +210,16 @@ def _credentials_missing() -> str | None:
 
 
 async def _set_power(host: str, turn_on: bool) -> None:
-    dev = await Discover.discover_single(host, username=config.KASA_USERNAME, password=config.KASA_PASSWORD)
+    dev = await _connect_updated(host)
     try:
-        await dev.update()
         await (dev.turn_on() if turn_on else dev.turn_off())
     finally:
         await dev.disconnect()
 
 
 async def _get_status(host: str) -> bool:
-    dev = await Discover.discover_single(host, username=config.KASA_USERNAME, password=config.KASA_PASSWORD)
+    dev = await _connect_updated(host)
     try:
-        await dev.update()
         return dev.is_on
     finally:
         await dev.disconnect()
@@ -173,9 +243,14 @@ def handle_list(arguments: dict, ctx: ToolContext) -> str:
     except Exception:
         log.exception("Kasa discovery failed")
         return "Error: couldn't reach any Kasa devices on the network."
-    if not _CACHE:
+    lines = [f"- {p.alias}: {'on' if p.is_on else 'off'}" for p in _CACHE.values()]
+    lines += [
+        f"- (name unknown, at {host}): on the network but wouldn't complete the auth handshake"
+        for host in _UNREACHABLE
+    ]
+    if not lines:
         return "No Kasa smart plugs found on the network."
-    return "\n".join(f"- {p.alias}: {'on' if p.is_on else 'off'}" for p in _CACHE.values())
+    return "\n".join(lines)
 
 
 @tool(
