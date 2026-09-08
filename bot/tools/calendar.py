@@ -206,8 +206,101 @@ def handle_list_events(arguments: dict, ctx: ToolContext) -> str:
         return f"No events between {arguments['start_iso']} and {arguments['end_iso']}."
 
     return "\n".join(
-        f"- {ev.get('summary', '(no title)')}: "
+        f"- [{ev['id']}] {ev.get('summary', '(no title)')}: "
         f"{ev['start'].get('dateTime', ev['start'].get('date'))} to "
         f"{ev['end'].get('dateTime', ev['end'].get('date'))}"
         for ev in events
     )
+
+
+@tool(
+    name="update_calendar_event",
+    description=(
+        "Change an existing event on the user's own Google Calendar — "
+        "reschedule it, rename it, or edit its details. Requires the "
+        "event's ID from list_calendar_events (call that first if you don't "
+        "already have it from earlier in the conversation). Only pass the "
+        "fields that are actually changing."
+    ),
+    properties={
+        "event_id": {"type": "string", "description": "The event's ID, from list_calendar_events."},
+        "summary": {"type": "string", "description": "New title, if changing."},
+        "start_iso": {"type": "string", "description": f"New start, {_LOCAL_ISO_FORMAT_NOTE}, if changing."},
+        "end_iso": {"type": "string", "description": f"New end, {_LOCAL_ISO_FORMAT_NOTE}, if changing."},
+        "description": {"type": "string", "description": "New description, if changing."},
+        "location": {"type": "string", "description": "New location, if changing."},
+    },
+    required=["event_id"],
+    household=True,
+)
+def handle_update_event(arguments: dict, ctx: ToolContext) -> str:
+    patch: dict = {}
+    for optional in ("summary", "description", "location"):
+        if arguments.get(optional):
+            patch[optional] = arguments[optional]
+
+    start_iso = arguments.get("start_iso")
+    if start_iso:
+        start_dt = _parse_local(start_iso)
+        if start_dt is None:
+            return f"Error: could not parse '{start_iso}' as a date/time. Ask the user to clarify."
+        patch["start"] = {"dateTime": start_dt.isoformat(), "timeZone": config.TIMEZONE}
+
+    end_iso = arguments.get("end_iso")
+    if end_iso:
+        end_dt = _parse_local(end_iso)
+        if end_dt is None:
+            return f"Error: could not parse '{end_iso}' as a date/time. Ask the user to clarify."
+        patch["end"] = {"dateTime": end_dt.isoformat(), "timeZone": config.TIMEZONE}
+
+    if not patch:
+        return "Error: nothing to update — provide at least one field to change."
+
+    service = _get_service(ctx.user_id)
+    if service is None:
+        return _NOT_CONNECTED
+
+    try:
+        updated = (
+            service.events()
+            .patch(calendarId="primary", eventId=arguments["event_id"], body=patch)
+            .execute()
+        )
+    except HttpError as exc:
+        if exc.resp.status in (404, 410):
+            return "Error: no event found with that ID — it may have been deleted. Try list_calendar_events again."
+        log.exception("Google Calendar update failed for user %s", ctx.user_id)
+        return "Error: Google Calendar rejected the request. Check the server logs for details."
+
+    return f"Event updated: {updated.get('htmlLink')}"
+
+
+@tool(
+    name="delete_calendar_event",
+    description=(
+        "Delete an event from the user's own Google Calendar. Requires the "
+        "event's ID from list_calendar_events (call that first if you don't "
+        "already have it from earlier in the conversation). This can't be "
+        "undone, so only call it once the user has confirmed which event "
+        "they mean."
+    ),
+    properties={
+        "event_id": {"type": "string", "description": "The event's ID, from list_calendar_events."},
+    },
+    required=["event_id"],
+    household=True,
+)
+def handle_delete_event(arguments: dict, ctx: ToolContext) -> str:
+    service = _get_service(ctx.user_id)
+    if service is None:
+        return _NOT_CONNECTED
+
+    try:
+        service.events().delete(calendarId="primary", eventId=arguments["event_id"]).execute()
+    except HttpError as exc:
+        if exc.resp.status in (404, 410):
+            return "Error: no event found with that ID — it may already be deleted. Try list_calendar_events again."
+        log.exception("Google Calendar delete failed for user %s", ctx.user_id)
+        return "Error: Google Calendar rejected the request. Check the server logs for details."
+
+    return "Event deleted."
