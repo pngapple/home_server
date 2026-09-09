@@ -242,3 +242,14 @@ GEOFENCE_USERS = _parse_geofence_users(os.environ.get("GEOFENCE_USERS", ""))
 # whether a recurring location reminder should already be active, instead
 # of waiting for the next webhook to find out.
 GEOFENCE_STATE_FILE = os.environ.get("GEOFENCE_STATE_FILE", "geofence_state.json")
+
+# Voice-command webhook (bot/voice_server.py) — a separate listener process
+# (voice/, wake-word + speech-to-text) on this same Pi POSTs transcribed
+# commands here. One shared secret rather than per-resident profile secrets
+# (contrast GEOFENCE_USERS above): this endpoint is deliberately scoped to
+# one fixed identity, CLAUDE_CODE_OWNER_ID, not a household of separate
+# voice users — the listener's own speaker verification is what limits who
+# can trigger it, not this secret (that just authenticates the listener
+# device itself). Same local-only-server pattern as the other sidecars.
+VOICE_SERVER_PORT = int(os.environ.get("VOICE_SERVER_PORT", "8794"))
+VOICE_SERVER_SECRET = os.environ.get("VOICE_SERVER_SECRET")

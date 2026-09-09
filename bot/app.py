@@ -40,6 +40,7 @@ from . import (
     oauth_server,
     permissions,
     users,
+    voice_server,
 )
 from .discord_client import client, display_name
 from .llm import ask_llm
@@ -69,6 +70,7 @@ _SIDECARS = (
     ("LLM status", llm_status_server.start),
     ("Cigboard", cigboard_server.start),
     ("Geofence webhook", geofence_server.start),
+    ("Voice command webhook", voice_server.start),
 )
 
 
@@ -181,13 +183,20 @@ async def on_ready():
 
 async def _announce_restart() -> None:
     """Say "back online" in whichever channel asked for the !deploy that
-    (probably) caused this startup. See deploy.py."""
-    channel_id = deploy.consume_pending_notify()
-    if channel_id is None:
+    (probably) caused this startup, then send its patch note now that the
+    server is actually back up (see deploy.restart()'s docstring for why
+    that's held until now rather than sent before the restart). See
+    deploy.py."""
+    pending = deploy.consume_pending_notify()
+    if pending is None:
         return
+    channel_id = pending["channel_id"]
     try:
         channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
         await channel.send("✅ Back online.")
+        patch_notes = pending.get("patch_notes")
+        if patch_notes:
+            await _broadcast_deploy_update(channel, patch_notes, pending.get("header"))
     except Exception:
         log.exception("Failed to announce restart in channel %s", channel_id)
 
@@ -355,15 +364,14 @@ async def _handle_deploy(message: discord.Message, text: str, roles: frozenset[s
     commit_summary = await asyncio.to_thread(
         deploy.commit_and_push, message.author.id, display_name(message.author)
     )
-    if commit_summary:
-        # Only the actual change summary is a "patch note" — mirror this one
-        # into the patch-notes channel.
-        await _broadcast_deploy_update(message.channel, commit_summary, header)
 
     # Purely operational status (nobody reading patch notes later cares that
     # a restart happened at some point) — origin channel only.
     await message.channel.send("🔄 Restarting now — back in a few seconds.")
-    deploy.restart(message.channel.id)
+    # The patch note itself waits for the restart to actually finish (see
+    # deploy.restart()'s docstring) rather than going out now, while the bot
+    # is about to drop offline.
+    deploy.restart(message.channel.id, patch_notes=commit_summary, header=header)
 
 
 async def _handle_thread_followup(message: discord.Message, text: str, roles: frozenset[str]) -> None:

@@ -16,6 +16,12 @@ notifies the channel *before* calling restart(), which stashes which
 channel asked in _NOTIFY_FILE so the new process can announce itself on
 startup (see consume_pending_notify(), called from app.py's on_ready).
 
+The commit summary (the actual "patch note") rides along in that same
+file rather than going out before the restart — the server is about to
+disappear for a few seconds, so a patch note broadcast beforehand would
+land while the bot looks dead. It's held until the new process is up and
+can pair it with "back online".
+
 commit_and_push() runs first, so a restart always leaves the repo caught up
 with whatever's actually about to run — CLAUDE_CODE_WORKDIR is where Claude
 Code sessions (claude_bridge.py) edit files directly on disk, and a restart
@@ -164,14 +170,22 @@ def commit_and_push(user_id: int | None = None, user_name: str | None = None) ->
     return f"✅ Committed and pushed: {summary!r}"
 
 
-def restart(channel_id: int) -> None:
+def restart(channel_id: int, patch_notes: str | None = None, header: str | None = None) -> None:
     """Unconditionally restarts the bot service — the caller (app.py) is
     responsible for deciding whether that's currently safe (see
     claude_bridge.in_flight_count()) and for saying so *before* calling
     this, since there's no chance to reply after: this process is about to
-    die."""
+    die.
+
+    `patch_notes`/`header` (the commit summary from commit_and_push(), and
+    who ran the deploy) are stashed rather than sent now, so they can be
+    broadcast once the new process is actually back up — see the module
+    docstring."""
     try:
-        jsonstore.write(_NOTIFY_FILE, {"channel_id": channel_id})
+        jsonstore.write(
+            _NOTIFY_FILE,
+            {"channel_id": channel_id, "patch_notes": patch_notes, "header": header},
+        )
     except OSError:
         # The caller has already promised a restart, so go through with it —
         # the only cost of losing this file is no "back online" message.
@@ -182,12 +196,17 @@ def restart(channel_id: int) -> None:
     subprocess.Popen(["sudo", "systemctl", "restart", config.SERVICE_NAME])
 
 
-def consume_pending_notify() -> int | None:
-    """Called once from on_ready. Returns the channel id to announce
-    "back online" in, if this startup was the result of a !deploy restart."""
+def consume_pending_notify() -> dict | None:
+    """Called once from on_ready. Returns {"channel_id", "patch_notes",
+    "header"} for the !deploy that (probably) caused this startup, or None
+    if this wasn't a deploy restart. `patch_notes`/`header` may still be
+    None within that dict — commit_and_push() returns None when there was
+    nothing to commit."""
     data = jsonstore.read(_NOTIFY_FILE, {})
     try:
         os.remove(_NOTIFY_FILE)
     except OSError:
         pass
-    return data.get("channel_id")
+    if "channel_id" not in data:
+        return None
+    return data

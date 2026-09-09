@@ -118,6 +118,34 @@ geofence webhook secrets and Google refresh tokens. Neither is committed.
 copies anything still there onto profiles at startup; once the log says it
 seeded, the variable can be deleted from `.env`.
 
+## Voice commands
+
+`bot/voice_server.py` is a local-only webhook (`/voice/command`, one of the
+`_SIDECARS` in `app.py`) that a separate process, `voice/` at the repo root,
+POSTs transcripts to. The two live in different venvs on purpose — `voice/`
+pulls in native audio deps (PortAudio, onnxruntime, torch) the Discord bot
+process has no use for.
+
+`voice/listen.py` does wake word (openWakeWord, custom-trained for "jian
+yang" — see `voice/wakeword/train.md`) and speaker verification
+(`voice/speaker.py`, Resemblyzer) entirely locally; a clip that isn't the
+enrolled voice (`voice/enroll.py`) never leaves the device. Only the
+matched clip goes out, to Groq's Whisper API (`voice/stt.py` — not
+OpenRouter, which has no STT endpoint) for transcription, and the resulting
+text is what reaches `voice_server.py`.
+
+`voice_server.py` fabricates a minimal stand-in for `discord.Message` (see
+its `_FakeMessage`) to drive `ask_llm()`/`dispatch_result()` as the fixed
+household owner (`config.CLAUDE_CODE_OWNER_ID`) — nothing in the tool
+registry needs more than `.author.id`/`.channel.id` except one line in
+`tools/calendar.py`, which is why `.author` is still a real fetched Discord
+user rather than a fake one. A regex fast path matches simple "turn on/off
+X" commands straight to `set_plug_power`, skipping the LLM/OpenRouter round
+trip that the fallback path (everything else, same as a DM) still pays for.
+Every reply is DMed to the owner via `notify.send_dm()` regardless of
+whether local TTS (`voice/tts.py`, piper) is configured or succeeds — that
+DM is the durable record, TTS is best-effort.
+
 ## Dashboards
 
 `bot/static/llm.html` and `cigboard/static/cigboard.html`, loaded via

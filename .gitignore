@@ -28,3 +28,11 @@ lessons.json
 
 # transient files from jsonstore.write()
 *.json.tmp
+
+# Voice commands (voice/) — its own venv, plus two personal, uncommitted
+# assets: your enrolled voiceprint and the trained "jian yang" wake-word
+# model (see voice/wakeword/train.md for why the model isn't checked in).
+voice/venv/
+voice/enrollment.npy
+voice/wakeword/*.onnx
+voice/wakeword/*.tflite

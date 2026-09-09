@@ -1,0 +1,12 @@
+# Kept separate from the top-level requirements.txt (bot/) on purpose: these
+# pull in native audio deps (PortAudio via sounddevice, onnxruntime,
+# resemblyzer's torch backend) that the Discord bot process has no use for
+# and shouldn't risk that venv over. Install into their own venv:
+#   python3 -m venv voice/venv && voice/venv/bin/pip install -r voice/requirements.txt
+sounddevice>=0.4
+numpy>=1.24
+openwakeword>=0.6
+onnxruntime>=1.16
+resemblyzer>=0.1.4
+requests>=2.31
+python-dotenv>=1.0

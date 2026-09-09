@@ -45,6 +45,11 @@ os.environ.update(
         "ADMIN_ROLE_NAME": "Administrator",
         "HOUSEHOLD_ROLE_NAME": "Home Resident",
         "TIMEZONE": "America/Indiana/Indianapolis",
+        # Blank by default so tests never inherit the live secret from
+        # .env — bot/config.py's load_dotenv() only fills in vars that
+        # aren't already set, so an explicit blank here wins either way.
+        # Individual tests monkeypatch config.VOICE_SERVER_SECRET as needed.
+        "VOICE_SERVER_SECRET": "",
     }
 )
 
