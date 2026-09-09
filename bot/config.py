@@ -87,6 +87,11 @@ TODOS_FILE = os.environ.get("TODOS_FILE", "todos.json")
 # Personal + shared grocery lists (see tools/groceries.py).
 GROCERIES_FILE = os.environ.get("GROCERIES_FILE", "groceries.json")
 
+# Per-user free-form notes (see tools/notes.py) — jotted down verbatim and
+# retrieved by text search, unlike todos (a checklist) or preferences (a
+# behavior rule fed into the system prompt).
+NOTES_FILE = os.environ.get("NOTES_FILE", "notes.json")
+
 # Google Calendar OAuth (per-Discord-user linking, see tools/calendar.py).
 GOOGLE_CLIENT_SECRETS_FILE = os.environ.get("GOOGLE_CLIENT_SECRETS_FILE", "client_secret.json")
 GOOGLE_CALENDAR_TOKENS_FILE = os.environ.get("GOOGLE_CALENDAR_TOKENS_FILE", "calendar_tokens.json")

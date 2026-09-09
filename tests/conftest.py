@@ -34,6 +34,7 @@ os.environ.update(
         "CIGARETTES_FILE": f"{DATA_DIR}/cigarettes.json",
         "TODOS_FILE": f"{DATA_DIR}/todos.json",
         "GROCERIES_FILE": f"{DATA_DIR}/groceries.json",
+        "NOTES_FILE": f"{DATA_DIR}/notes.json",
         "GOOGLE_CALENDAR_TOKENS_FILE": f"{DATA_DIR}/calendar_tokens.json",
         "MODERATION_STRIKES_FILE": f"{DATA_DIR}/moderation.json",
         "GEOFENCE_STATE_FILE": f"{DATA_DIR}/geofence_state.json",

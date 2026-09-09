@@ -227,6 +227,7 @@ _TOOL_MODULES = (
     "geofence_admin",
     "users_admin",
     "preferences",
+    "notes",
 )
 
 for _module in _TOOL_MODULES:
