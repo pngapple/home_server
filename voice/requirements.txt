@@ -12,3 +12,13 @@ requests>=2.31
 python-dotenv>=1.0
 piper-tts>=1.8
 websockets>=12
+
+# Pinned CPU build, and the index that provides it — this Pi has no NVIDIA
+# GPU, but a plain `pip install resemblyzer`/`torch` resolves to the default
+# PyPI wheel, which on this platform pulled in ~3GB of completely unused
+# nvidia-cu13 CUDA runtime packages (cublas, cudnn, cufft, nccl, triton...)
+# as transitive deps and pushed the voice-listener process's RSS well past
+# what a CPU-only speaker-verification model should ever need. Found by
+# checking why the process was using 686MB of RAM.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu

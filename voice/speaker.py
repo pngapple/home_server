@@ -15,9 +15,21 @@ enrolled person," which is a much easier bar than open-set speaker ID.
 """
 
 import numpy as np
+import torch
 from resemblyzer import VoiceEncoder, preprocess_wav
 
 from . import config
+
+# Unset, torch defaults to one intra-op thread per CPU core for its own
+# ops — on this Pi's 4 cores, that's real contention against openWakeWord's
+# ONNX session (already pinned to 1 thread — see listen.py's Model()) and
+# piper's synthesis, both of which can be running around the same time as
+# a speaker check. This is also almost certainly part of why piper hit its
+# 30s TTS timeout once under load (see tts.py) — capping this narrows that
+# kind of contention without giving up meaningfully anything: a few-second
+# clip's embedding is fast enough on 2 threads that stealing the other 2
+# from openWakeWord/piper was never buying much.
+torch.set_num_threads(2)
 
 _encoder: VoiceEncoder | None = None
 
