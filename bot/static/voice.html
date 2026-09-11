@@ -72,21 +72,22 @@
   }
   #audio-enable:hover { background: var(--surface-2); }
 
-  .mic-toggle-row { display: flex; align-items: center; gap: 0.7em; margin: 0 0 0.5em; }
-  .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .switch-track {
-    position: absolute; inset: 0; background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: 999px; transition: background 0.2s ease; cursor: pointer;
+  .ptt-row { display: flex; align-items: center; gap: 0.9em; margin: 0 0 0.5em; }
+  #ptt-button {
+    display: flex; align-items: center; justify-content: center;
+    width: 52px; height: 52px; flex: none; border-radius: 50%;
+    background: var(--surface-1); border: 1px solid var(--border);
+    color: var(--text-primary); font-size: 1.3em; cursor: pointer;
+    user-select: none; -webkit-user-select: none; touch-action: none;
+    transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
   }
-  .switch-thumb {
-    position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
-    background: var(--text-primary); border-radius: 50%; transition: transform 0.2s ease;
+  #ptt-button:active,
+  #ptt-button.held {
+    background: var(--danger); color: #fff; transform: scale(1.08);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--danger) 20%, transparent);
   }
-  .switch input:checked + .switch-track { background: var(--good); }
-  .switch input:checked + .switch-track .switch-thumb { transform: translateX(16px); }
-  .switch input:disabled + .switch-track { opacity: 0.4; cursor: not-allowed; }
-  #mic-toggle-label { font-size: 0.85em; color: var(--text-secondary); }
+  #ptt-button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #ptt-label { font-size: 0.85em; color: var(--text-secondary); }
   .mic-note { font-size: 0.78em; color: var(--text-muted); margin: 0 0 1.5em; max-width: 30em; }
   .mic-note.error { color: var(--danger); }
 
@@ -196,12 +197,9 @@
   <p class="subtitle">what the wake-word listener is doing right now</p>
   <button id="audio-enable" hidden>🔈 Tap to enable spoken replies</button>
 
-  <div class="mic-toggle-row">
-    <label class="switch">
-      <input type="checkbox" id="mic-toggle">
-      <span class="switch-track"><span class="switch-thumb"></span></span>
-    </label>
-    <span id="mic-toggle-label">Use this device's mic too</span>
+  <div class="ptt-row">
+    <button id="ptt-button" type="button" aria-label="Hold to talk">🎤</button>
+    <span id="ptt-label">Hold to talk from this device</span>
   </div>
   <div class="mic-note" id="mic-note" hidden></div>
 
@@ -255,6 +253,7 @@ function fmtElapsed(s) {
 }
 
 let current = null; // last-rendered snapshot, so the per-second clock tick doesn't need another fetch
+let micStream = null, micAudioCtx = null, micWs = null, pttHeld = false; // push-to-talk state — declared here (not lower, next to the functions that use it) because poll() below reads pttHeld before that section of the script would otherwise have run
 let lastAudioId = null; // null until the first poll — see applyPhase: whatever's already there when the page opens is not "new"
 let audioUnlocked = false; // true once any play() has actually succeeded on this page load
 
@@ -311,8 +310,8 @@ function applyPhase(data) {
   // the time. A browser source is the interesting case ("closest mic wins"
   // made visible) — but with multiple devices possibly connected, it may
   // not be *this* viewer's device, so this doesn't claim "this device".
-  if (src && src.startsWith('browser:') && !['listening', 'offline'].includes(data.phase)) {
-    detailText += (detailText ? ' ' : '') + '— heard via a browser mic';
+  if (src && src.startsWith('browser_ptt:') && !['listening', 'offline'].includes(data.phase)) {
+    detailText += (detailText ? ' ' : '') + '— sent via a browser mic';
   }
   document.getElementById('phase-detail').innerHTML = escapeHtml(detailText);
   document.getElementById('waveform').classList.toggle('show', !!spec.waveform);
@@ -328,6 +327,7 @@ function tickClock() {
 }
 
 async function poll() {
+  if (pttHeld) return; // don't let a stale server phase stomp the local "recording" state — see startTalking()
   try {
     const resp = await fetch('api/status');
     applyPhase(await resp.json());
@@ -337,14 +337,16 @@ poll();
 setInterval(poll, 1500);
 setInterval(tickClock, 1000);
 
-// --- Browser mic: streams raw 16kHz mono PCM to voice/browser_mic.py,
-// which hands it to its own instance of the exact same wake-word pipeline
-// the Pi's mic runs — see that module's docstring for why nothing here
-// tries to detect "hey jarvis" itself. Requires a secure context (HTTPS,
-// or localhost) — every browser refuses getUserMedia() otherwise, which is
-// the expected failure mode until Tailscale HTTPS certs are set up for
-// this tailnet.
-let micStream = null, micAudioCtx = null, micWs = null;
+// --- Push-to-talk: hold the button, stream raw 16kHz mono PCM to
+// voice/browser_mic.py over a WebSocket that's open exactly as long as the
+// button is held; releasing it closes the connection, which *is* the "end
+// of recording" signal server-side. No wake word involved on this path —
+// pressing the button already means "I'm about to say a command," the same
+// intent a wake word exists to substitute for (see browser_mic.py's
+// docstring for why continuous always-listening browser mics were tried
+// and dropped in favor of this). Requires a secure context (HTTPS, or
+// localhost) — every browser refuses getUserMedia() otherwise. (State vars
+// are declared up near `current`, not here — see that comment.)
 
 function micNote(text, isError) {
   const el = document.getElementById('mic-note');
@@ -353,19 +355,30 @@ function micNote(text, isError) {
   el.hidden = !text;
 }
 
-async function enableBrowserMic() {
+async function startTalking() {
+  if (pttHeld) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     micNote('This page needs HTTPS (or localhost) for microphone access — plain http:// isn’t allowed by the browser.', true);
-    return false;
+    return;
   }
+  pttHeld = true;
+  const button = document.getElementById('ptt-button');
+  button.classList.add('held');
+  // Immediate local feedback — the server only learns a recording happened
+  // once this connection closes, so waiting on the next poll tick would
+  // show nothing until well after you've already released the button.
+  applyPhase({ phase: 'recording', detail: {}, online: true, phase_since: Date.now() / 1000, audio_id: lastAudioId });
+
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     });
   } catch (e) {
     micNote('Microphone access denied or unavailable (' + e.message + ').', true);
-    return false;
+    stopTalking();
+    return;
   }
+  if (!pttHeld) { micStream.getTracks().forEach(t => t.stop()); return; } // released while permission prompt was up
 
   const wsUrl = new URL('mic-ws', document.baseURI);
   wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -402,32 +415,34 @@ async function enableBrowserMic() {
   processor.connect(muteGain);
   muteGain.connect(micAudioCtx.destination);
 
-  micWs.addEventListener('close', () => micNote('Mic connection lost — toggle off and on to retry.', true));
   micWs.addEventListener('error', () => micNote('Could not reach the voice listener for mic streaming.', true));
   micNote('');
-  return true;
 }
 
-function disableBrowserMic() {
+function stopTalking() {
+  if (!pttHeld) return;
+  pttHeld = false;
+  document.getElementById('ptt-button').classList.remove('held');
+  const hadRealRecording = !!micWs; // false if released during the getUserMedia permission prompt, or on denial
   if (micWs) { try { micWs.close(); } catch (e) {} micWs = null; }
   if (micAudioCtx) { try { micAudioCtx.close(); } catch (e) {} micAudioCtx = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-  micNote('');
+  // Optimistic: we know what's about to happen server-side and don't need
+  // to wait up to 1500ms for the next poll to show it — poll() will take
+  // back over (and correct this if reality differs) on its own next tick,
+  // now that pttHeld is false again.
+  if (hadRealRecording) {
+    applyPhase({ phase: 'transcribing', detail: {}, online: true, phase_since: Date.now() / 1000, audio_id: lastAudioId });
+  }
 }
 
-document.getElementById('mic-toggle').addEventListener('change', async (e) => {
-  if (e.target.checked) {
-    e.target.disabled = true;
-    const ok = await enableBrowserMic();
-    e.target.disabled = false;
-    if (!ok) e.target.checked = false;
-  } else {
-    disableBrowserMic();
-  }
-});
-// Mic access is opt-in every page load (no persisted "was it on" state) —
-// getUserMedia can't be granted silently anyway, so there's nothing to
-// gain from remembering the toggle position versus just defaulting off.
+const pttButton = document.getElementById('ptt-button');
+pttButton.addEventListener('mousedown', startTalking);
+pttButton.addEventListener('mouseup', stopTalking);
+pttButton.addEventListener('mouseleave', stopTalking); // dragged off while held — don't leave it stuck open
+pttButton.addEventListener('touchstart', (e) => { e.preventDefault(); startTalking(); }, { passive: false });
+pttButton.addEventListener('touchend', (e) => { e.preventDefault(); stopTalking(); }, { passive: false });
+pttButton.addEventListener('touchcancel', (e) => { e.preventDefault(); stopTalking(); }, { passive: false });
 </script>
 </body>
 </html>

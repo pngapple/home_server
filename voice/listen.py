@@ -1,30 +1,32 @@
 """
 Main loop: `python -m voice.listen`.
 
-Wake word (openWakeWord, continuous, local) -> record the command until a
-short silence -> speaker verification (local; a non-match is dropped right
-here, before any network call) -> transcribe the clip (Groq Whisper, the one
-unavoidable cloud hop) -> POST the transcript to the bot's /voice/command
-webhook -> synthesize the reply (piper, local) and ship it to the /voice/
-dashboard (bot/voice_status_server.py) to play in-browser.
+Wake word (openWakeWord, continuous, local, Pi mic only — see below) ->
+record the command until a short silence -> speaker verification (local; a
+non-match is dropped right here, before any network call) -> transcribe the
+clip (Groq Whisper, the one unavoidable cloud hop) -> POST the transcript to
+the bot's /voice/command webhook -> synthesize the reply (piper, local) and
+ship it to the /voice/ dashboard (bot/voice_status_server.py) to play
+in-browser.
 
 Everything before the POST runs on this device only. See the plan doc
 (voice commands) for the full latency reasoning and the division of labor
 between this process and bot/voice_server.py.
 
-This same pipeline runs once per audio source, not once total: the Pi's own
-mic always gets one, and browser_mic.py spawns another per browser tab that
-has its dashboard "use this mic too" toggle on — see Listener below and
-run()'s wiring. Whichever source's Listener actually hears the wake word
-first is the one that acts; there's no explicit "which mic is closest"
-comparison because none is needed.
+Wake-word detection only runs against the Pi's own mic (the Listener class
+below). A device with the /voice/ dashboard open instead gets push-to-talk
+(voice/browser_mic.py): pressing the mic button there already signals
+intent the way a wake word exists to substitute for, so running wake-word
+detection on a browser's mic too would just be redundant — continuous
+always-listening browser mics were tried and deliberately dropped in favor
+of this. Both paths converge on _handle_command_audio() once they each have
+a finished clip, so speaker verification, transcription, and everything
+after is identical either way.
 """
 
 import base64
 import collections
 import logging
-import queue
-import threading
 import time
 
 import numpy as np
@@ -115,10 +117,8 @@ def _report_status(source: str, phase: str, detail: dict | None = None, audio: b
     wake-word detection over. `audio`, when given, is a WAV clip (see
     tts.synthesize) the dashboard plays in-browser instead of this device
     speaking it locally — base64 because it rides along in the same JSON
-    status POST rather than a separate upload. `source` says which
-    Listener this came from (the Pi's mic, or which browser connection) —
-    with several possibly running at once, the dashboard needs that to
-    show anything meaningful about which one actually heard you."""
+    status POST rather than a separate upload. `source` says where this
+    came from (the Pi's mic, or which push-to-talk connection)."""
     body = {"secret": config.VOICE_SERVER_SECRET, "phase": phase, "detail": {**(detail or {}), "source": source}}
     if audio:
         body["audio_b64"] = base64.b64encode(audio).decode("ascii")
@@ -128,12 +128,48 @@ def _report_status(source: str, phase: str, detail: dict | None = None, audio: b
         pass
 
 
+def _handle_command_audio(source: str, command_audio: np.ndarray) -> None:
+    """Everything from "I have a finished recording" onward: speaker
+    verification, transcription, sending it to the bot, and speaking the
+    reply back. Shared by the Pi's wake-word Listener (which gets here via
+    silence-based endpointing after a trigger) and push-to-talk (which gets
+    here as soon as the button is released) — neither cares how the other
+    decided a recording was complete."""
+    matched, sim_score = speaker.is_enrolled_speaker(command_audio)
+    log.info(
+        "[%s] Speaker check: score=%.3f threshold=%.2f -> %s",
+        source,
+        sim_score,
+        config.SPEAKER_THRESHOLD,
+        "match" if matched else "REJECTED",
+    )
+    if not matched:
+        _report_status(source, "rejected", {"reason": "speaker mismatch", "score": round(float(sim_score), 3)})
+        return
+
+    _report_status(source, "transcribing")
+    result = stt.transcribe(command_audio)
+    if not result.text:
+        log.info("[%s] Empty transcript, ignoring", source)
+        _report_status(source, "rejected", {"reason": "empty transcript"})
+        return
+    log.info("[%s] Transcript: %r (audio=%.1fs, cost=$%.5f)", source, result.text, result.duration_s, result.cost_usd)
+
+    _report_status(source, "sending", {"transcript": result.text})
+    reply = _send_command(result)
+    if reply is not None:
+        log.info("[%s] Reply: %s", source, reply)
+        # Spoken through the /voice/ dashboard in the browser, not this
+        # device's own speaker — see tts.synthesize's docstring.
+        _report_status(source, "replied", {"transcript": result.text, "reply": reply[:400]}, audio=tts.synthesize(reply))
+    else:
+        _report_status(source, "error", {"reason": "webhook unreachable", "transcript": result.text})
+
+
 class Listener:
-    """One instance per audio source (the Pi's own mic, or one per browser
-    tab currently streaming via browser_mic.py) — each owns its own
-    openWakeWord model instance and buffers, so two sources running at once
-    never share mutable state that would corrupt each other's streaming
-    predictions."""
+    """Wake-word detection against the Pi's own mic. There is exactly one
+    of these — unlike the old design, browser connections no longer get one
+    of their own (see push-to-talk in browser_mic.py / _on_ptt_clip below)."""
 
     def __init__(self, source: str, frames):
         self.source = source
@@ -150,19 +186,6 @@ class Listener:
         last_heartbeat = time.monotonic()
 
         for frame in self.frames:
-            # A browser connection with nothing currently arriving (idle,
-            # or just disconnected) ticks this loop with IDLE_FRAME rather
-            # than blocking — see browser_mic.frame_stream(). Running
-            # wake-word inference on that would be pure waste, and for the
-            # Pi's own mic this branch is simply never taken (its frames
-            # are never that exact object).
-            if frame is browser_mic.IDLE_FRAME:
-                now = time.monotonic()
-                if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
-                    _report_status(self.source, "listening")
-                    last_heartbeat = now
-                continue
-
             pcm16 = (np.clip(frame, -1.0, 1.0) * 32767).astype(np.int16)
             prediction = self.oww.predict(pcm16)
             score = prediction.get(self.wake_word_name, 0.0)
@@ -189,53 +212,22 @@ class Listener:
             command_audio = _record_command(self.frames, self.preroll)
             self.preroll.clear()
 
-            matched, sim_score = speaker.is_enrolled_speaker(command_audio)
-            log.info(
-                "[%s] Speaker check: score=%.3f threshold=%.2f -> %s",
-                self.source,
-                sim_score,
-                config.SPEAKER_THRESHOLD,
-                "match" if matched else "REJECTED",
-            )
-            if not matched:
-                _report_status(self.source, "rejected", {"reason": "speaker mismatch", "score": round(float(sim_score), 3)})
-                last_heartbeat = time.monotonic()
-                continue
-
-            _report_status(self.source, "transcribing")
-            result = stt.transcribe(command_audio)
-            if not result.text:
-                log.info("[%s] Empty transcript, ignoring", self.source)
-                _report_status(self.source, "rejected", {"reason": "empty transcript"})
-                last_heartbeat = time.monotonic()
-                continue
-            log.info("[%s] Transcript: %r (audio=%.1fs, cost=$%.5f)", self.source, result.text, result.duration_s, result.cost_usd)
-
-            _report_status(self.source, "sending", {"transcript": result.text})
-            reply = _send_command(result)
-            if reply is not None:
-                log.info("[%s] Reply: %s", self.source, reply)
-                # Spoken through the /voice/ dashboard in the browser, not
-                # this device's own speaker — see tts.synthesize's docstring.
-                _report_status(
-                    self.source, "replied", {"transcript": result.text, "reply": reply[:400]}, audio=tts.synthesize(reply)
-                )
-            else:
-                _report_status(self.source, "error", {"reason": "webhook unreachable", "transcript": result.text})
+            _handle_command_audio(self.source, command_audio)
             last_heartbeat = time.monotonic()
 
 
-def _on_browser_connection(remote: str, q: "queue.Queue") -> None:
-    """Called from browser_mic's WebSocket thread for each new connection —
-    spins up a dedicated Listener + thread for it, which winds itself down
-    once that connection's frame_stream sees the disconnect sentinel."""
-    listener = Listener(f"browser:{remote}", browser_mic.frame_stream(q))
-    threading.Thread(target=listener.run, name=f"listener-browser-{remote}", daemon=True).start()
+def _on_ptt_clip(remote: str, command_audio: np.ndarray) -> None:
+    """Called from browser_mic.py once a push-to-talk recording is
+    complete (the connection closed) — skips straight to verification,
+    no wake word involved."""
+    source = f"browser_ptt:{remote}"
+    _report_status(source, "recording")  # dashboard visibility only; the recording is already done by this point
+    _handle_command_audio(source, command_audio)
 
 
 def run() -> None:
     log.info("Loading wake-word model from %s", config.WAKE_WORD_MODEL_PATH)
-    browser_mic.on_connection(_on_browser_connection)
+    browser_mic.on_clip(_on_ptt_clip)
     browser_mic.start_background()
     Listener("pi_mic", pi_frame_stream()).run()
 
