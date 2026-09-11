@@ -36,3 +36,7 @@ voice/venv/
 voice/enrollment.npy
 voice/wakeword/*.onnx
 voice/wakeword/*.tflite
+
+# Downloaded piper TTS voice models (voice/tts.py) — large binary assets
+# fetched by `piper.download_voices`, not code.
+voice/piper_voices/

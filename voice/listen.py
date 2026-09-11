@@ -5,13 +5,15 @@ Wake word (openWakeWord, continuous, local) -> record the command until a
 short silence -> speaker verification (local; a non-match is dropped right
 here, before any network call) -> transcribe the clip (Groq Whisper, the one
 unavoidable cloud hop) -> POST the transcript to the bot's /voice/command
-webhook -> speak the reply back (piper, local).
+webhook -> synthesize the reply (piper, local) and ship it to the /voice/
+dashboard (bot/voice_status_server.py) to play in-browser.
 
 Everything before the POST runs on this device only. See the plan doc
 (voice commands) for the full latency reasoning and the division of labor
 between this process and bot/voice_server.py.
 """
 
+import base64
 import collections
 import logging
 import time
@@ -97,17 +99,19 @@ def _send_command(result: stt.Transcription) -> str | None:
         return None
 
 
-def _report_status(phase: str, detail: dict | None = None) -> None:
+def _report_status(phase: str, detail: dict | None = None, audio: bytes | None = None) -> None:
     """Best-effort push to the dashboard. Short timeout, swallows every
     error — unlike _send_command's failure (which drops a real command),
     a missed status ping is just a stale dashboard, never worth stalling
-    wake-word detection over."""
+    wake-word detection over. `audio`, when given, is a WAV clip (see
+    tts.synthesize) the dashboard plays in-browser instead of this device
+    speaking it locally — base64 because it rides along in the same JSON
+    status POST rather than a separate upload."""
+    body = {"secret": config.VOICE_SERVER_SECRET, "phase": phase, "detail": detail or {}}
+    if audio:
+        body["audio_b64"] = base64.b64encode(audio).decode("ascii")
     try:
-        requests.post(
-            config.VOICE_STATUS_URL,
-            json={"secret": config.VOICE_SERVER_SECRET, "phase": phase, "detail": detail or {}},
-            timeout=3,
-        )
+        requests.post(config.VOICE_STATUS_URL, json=body, timeout=(5 if audio else 3))
     except Exception:
         pass
 
@@ -170,8 +174,9 @@ def run() -> None:
         reply = _send_command(result)
         if reply is not None:
             log.info("Reply: %s", reply)
-            _report_status("replied", {"transcript": result.text, "reply": reply[:400]})
-            tts.speak(reply)
+            # Spoken through the /voice/ dashboard in the browser, not this
+            # device's own speaker — see tts.synthesize's docstring.
+            _report_status("replied", {"transcript": result.text, "reply": reply[:400]}, audio=tts.synthesize(reply))
         else:
             _report_status("error", {"reason": "webhook unreachable", "transcript": result.text})
         last_heartbeat = time.monotonic()

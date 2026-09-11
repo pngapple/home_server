@@ -14,8 +14,19 @@ listener process is allowed to say this" trust boundary as the command
 webhook. "Online" isn't a field the listener sets; it's derived here from
 how long ago the last update landed, so a crashed/killed listener shows as
 offline instead of frozen on its last real phase forever.
+
+A "replied" update can carry a synthesized WAV clip (base64, under
+`audio_b64`) — the reply is spoken through *this* page in the browser
+rather than through whatever's plugged into the Pi, which is why TTS lives
+here and not just as a local aplay call in voice/tts.py. Only the latest
+clip is kept: this is "what should I be playing right now", not a
+transcript archive (bot/voice_server.py's DM to the owner is that record).
+`audio_id` is a monotonic counter, not a hash or timestamp of the clip
+itself, so the dashboard can cheaply tell "there's a new clip" from "same
+clip, poll again" without re-fetching audio bytes on every tick.
 """
 
+import base64
 import hmac
 import logging
 import time
@@ -37,7 +48,10 @@ _state = {
     "detail": {},
     "updated_at": 0.0,
     "phase_since": 0.0,
+    "audio_id": 0,
 }
+
+_audio: bytes | None = None
 
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -55,11 +69,19 @@ async def handle_get_status(request: web.Request) -> web.Response:
             "online": online,
             "updated_at": _state["updated_at"],
             "phase_since": _state["phase_since"],
+            "audio_id": _state["audio_id"],
         }
     )
 
 
+async def handle_get_audio(request: web.Request) -> web.Response:
+    if _audio is None:
+        return web.Response(status=404, text="No audio yet.")
+    return web.Response(body=_audio, content_type="audio/wav")
+
+
 async def handle_post_status(request: web.Request) -> web.Response:
+    global _audio
     if not config.VOICE_SERVER_SECRET:
         return web.Response(status=503, text="Voice commands aren't configured on the server.")
     try:
@@ -81,6 +103,15 @@ async def handle_post_status(request: web.Request) -> web.Response:
     _state["phase"] = phase
     _state["detail"] = body.get("detail") or {}
     _state["updated_at"] = now
+
+    audio_b64 = body.get("audio_b64")
+    if audio_b64:
+        try:
+            _audio = base64.b64decode(audio_b64)
+            _state["audio_id"] += 1
+        except Exception:
+            log.warning("Dropped an unparseable audio_b64 on a status update")
+
     return web.json_response({"ok": True})
 
 
@@ -92,5 +123,6 @@ async def start() -> None:
             web.get("/", handle_index),
             web.get("/api/status", handle_get_status),
             web.post("/api/status", handle_post_status),
+            web.get("/api/audio", handle_get_audio),
         ],
     )
