@@ -46,8 +46,23 @@
     color: var(--text-primary);
     font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    position: relative;
   }
-  .wrap { max-width: 34em; margin: 0 auto; padding: 3em 1.5em 4em; }
+  /* Faint ambient grid, slowly panning — a monitoring-station backdrop
+     rather than a flat page. Masked to a center vignette so it reads as
+     atmosphere, not a texture fighting the content for attention. */
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 44px 44px;
+    -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 20%, black 0%, transparent 70%);
+    mask-image: radial-gradient(ellipse 60% 50% at 50% 20%, black 0%, transparent 70%);
+    animation: gridpan 50s linear infinite;
+  }
+  @keyframes gridpan { to { background-position: 44px 88px; } }
+  .wrap { position: relative; z-index: 1; max-width: 34em; margin: 0 auto; padding: 3em 1.5em 4em; }
   .header { display: flex; align-items: baseline; gap: 0.7em; margin-bottom: 0.2em; }
   h1 { font-size: 1.5em; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
   .live { display: inline-flex; align-items: center; gap: 0.45em; font-size: 0.76em; color: var(--text-muted); }
@@ -139,6 +154,57 @@
     width: 200px; height: 200px;
     display: flex; align-items: center; justify-content: center;
   }
+  /* Slowly-rotating instrument rings — ambient, always present at low
+     opacity regardless of phase, dashed/dotted so the rotation actually
+     reads instead of just looking like a static circle. This is the
+     "always-on HUD" layer; orb-ring/orb-ring-2 below are the sharp pulse
+     rings a phase change fires once. */
+  .orb-hud-ring, .orb-hud-ring-2 {
+    position: absolute; border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--phase-color) 45%, transparent);
+    transition: border-color 0.5s ease, opacity 0.5s ease;
+  }
+  .orb-hud-ring { inset: -14px; border-style: dashed; animation: spin 14s linear infinite; }
+  .orb-hud-ring-2 {
+    inset: -28px; border-style: dotted;
+    border-color: color-mix(in srgb, var(--phase-color) 28%, transparent);
+    animation: spin 22s linear infinite reverse;
+  }
+  .orb-stage[data-phase="offline"] .orb-hud-ring,
+  .orb-stage[data-phase="offline"] .orb-hud-ring-2 { opacity: 0.4; animation-play-state: paused; }
+
+  /* A sweeping radar-style scan, only while actually listening/recording —
+     signals "actively watching" the way a static ring can't. */
+  .orb-scan {
+    position: absolute; inset: -14px; border-radius: 50%;
+    background: conic-gradient(from 0deg,
+      transparent 0deg,
+      color-mix(in srgb, var(--phase-color) 55%, transparent) 18deg,
+      transparent 42deg);
+    opacity: 0; animation: spin 2.6s linear infinite;
+    transition: opacity 0.4s ease;
+  }
+  .orb-stage[data-phase="listening"] .orb-scan { opacity: 0.85; }
+  .orb-stage[data-phase="recording"] .orb-scan { opacity: 0.9; animation-duration: 1s; }
+
+  /* One-shot burst, fired from JS on the "awoken" transition (see
+     triggerBurst) — a wake word is the one moment worth a flourish beyond
+     a state color change. */
+  .particles { position: absolute; inset: 0; pointer-events: none; }
+  .particles span {
+    position: absolute; top: 50%; left: 50%; width: 5px; height: 5px;
+    margin: -2.5px 0 0 -2.5px; border-radius: 50%;
+    background: var(--phase-color);
+    box-shadow: 0 0 6px 1px var(--phase-color);
+    opacity: 0;
+    transform: rotate(var(--angle)) translateX(0);
+  }
+  .particles.burst span { animation: particle-fly 0.75s cubic-bezier(0.2,0.8,0.3,1) forwards; }
+  @keyframes particle-fly {
+    0%   { opacity: 1; transform: rotate(var(--angle)) translateX(0) scale(1); }
+    100% { opacity: 0; transform: rotate(var(--angle)) translateX(92px) scale(0.4); }
+  }
+
   .orb-ring, .orb-ring-2 {
     position: absolute; inset: 0; border-radius: 50%;
     border: 2px solid var(--phase-color);
@@ -233,9 +299,18 @@
   <div class="panel">
     <div class="orb-wrap">
       <div class="orb-stage" id="orb-stage" data-phase="offline">
+        <div class="orb-hud-ring"></div>
+        <div class="orb-hud-ring-2"></div>
+        <div class="orb-scan"></div>
         <div class="orb-ring"></div>
         <div class="orb-ring-2"></div>
         <div class="orbit"><span></span><span></span><span></span></div>
+        <div class="particles" id="particles">
+          <span style="--angle:0deg"></span><span style="--angle:45deg"></span>
+          <span style="--angle:90deg"></span><span style="--angle:135deg"></span>
+          <span style="--angle:180deg"></span><span style="--angle:225deg"></span>
+          <span style="--angle:270deg"></span><span style="--angle:315deg"></span>
+        </div>
         <div class="orb-core"></div>
       </div>
       <div class="waveform" id="waveform">
@@ -295,7 +370,7 @@ function fmtElapsed(s) {
 }
 
 let current = null; // last-rendered snapshot, so the per-second clock tick doesn't need another fetch
-let micStream = null, micAudioCtx = null, micWs = null, pttHeld = false; // push-to-talk state — declared here (not lower, next to the functions that use it) because poll() below reads pttHeld before that section of the script would otherwise have run
+let micStream = null, micAudioCtx = null, micWs = null, pttHeld = false, micAnalyser = null, micRafId = null; // push-to-talk state — declared here (not lower, next to the functions that use it) because poll() below reads pttHeld before that section of the script would otherwise have run
 let lastAudioId = null; // null until the first poll — see applyPhase: whatever's already there when the page opens is not "new"
 let audioUnlocked = false; // true once any play() has actually succeeded on this page load
 
@@ -377,6 +452,42 @@ function renderHistory(history) {
   }).join('');
 }
 
+function triggerBurst() {
+  const el = document.getElementById('particles');
+  el.classList.remove('burst');
+  void el.offsetWidth; // force reflow so re-adding the class restarts the animation, even if triggered twice in a row
+  el.classList.add('burst');
+}
+
+// Terminal-style decode: scrambles through random characters before
+// settling on the real text, rather than the text just appearing. Only
+// worth the motion when the text actually changed — replaying it on every
+// 1.5s poll tick for identical text would be distracting noise, not a
+// flourish.
+const _SCRAMBLE_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+function scrambleInto(el, finalText) {
+  if (el.dataset.lastText === finalText) return;
+  el.dataset.lastText = finalText;
+  clearInterval(el._scrambleTimer);
+  const len = finalText.length;
+  const totalFrames = Math.min(14, Math.max(6, Math.round(len / 3)));
+  let frame = 0;
+  el._scrambleTimer = setInterval(() => {
+    frame++;
+    const revealCount = Math.floor((frame / totalFrames) * len);
+    let out = '';
+    for (let i = 0; i < len; i++) {
+      const c = finalText[i];
+      out += (i < revealCount || c === ' ' || c === '“' || c === '”') ? c
+        : _SCRAMBLE_CHARS[Math.floor(Math.random() * _SCRAMBLE_CHARS.length)];
+    }
+    el.textContent = out;
+    if (frame >= totalFrames) clearInterval(el._scrambleTimer);
+  }, 22);
+}
+
+let lastPhase = null;
+
 function applyPhase(data) {
   const isNewAudio = lastAudioId !== null && data.audio_id && data.audio_id !== lastAudioId;
   if (lastAudioId === null) lastAudioId = data.audio_id; // baseline on first poll — don't replay old replies on load
@@ -391,6 +502,9 @@ function applyPhase(data) {
   const style = getComputedStyle(document.querySelector('.viz-root'));
   const color = spec.color.startsWith('--') ? style.getPropertyValue(spec.color).trim() : spec.color;
 
+  if (data.phase === 'awoken' && lastPhase !== 'awoken') triggerBurst();
+  lastPhase = data.phase;
+
   stage.dataset.phase = data.phase;
   stage.style.setProperty('--phase-color', color);
   document.getElementById('phase-label').textContent = spec.label;
@@ -404,7 +518,7 @@ function applyPhase(data) {
   if (src && src.startsWith('browser_ptt:') && !['listening', 'offline'].includes(data.phase)) {
     detailText += (detailText ? ' ' : '') + '— sent via a browser mic';
   }
-  document.getElementById('phase-detail').innerHTML = escapeHtml(detailText);
+  scrambleInto(document.getElementById('phase-detail'), detailText);
   document.getElementById('waveform').classList.toggle('show', !!spec.waveform);
 
   const live = document.getElementById('live');
@@ -506,8 +620,53 @@ async function startTalking() {
   processor.connect(muteGain);
   muteGain.connect(micAudioCtx.destination);
 
+  // A parallel tap, not part of the capture chain above — this is purely
+  // for driving the waveform bars from your actual voice level in real
+  // time, not a canned animation. Separate from the pcm16-over-WebSocket
+  // path entirely; losing this tap would never affect what gets sent.
+  micAnalyser = micAudioCtx.createAnalyser();
+  micAnalyser.fftSize = 256;
+  source.connect(micAnalyser);
+  driveWaveformLive();
+
   micWs.addEventListener('error', () => micNote('Could not reach the voice listener for mic streaming.', true));
   micNote('');
+}
+
+function driveWaveformLive() {
+  if (!micAnalyser) return;
+  const data = new Uint8Array(micAnalyser.fftSize);
+  const bars = document.querySelectorAll('#waveform span');
+  micAnalyser.getByteTimeDomainData(data);
+  let sumSquares = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = (data[i] - 128) / 128;
+    sumSquares += v * v;
+  }
+  const level = Math.sqrt(sumSquares / data.length); // 0..~1 RMS of this frame
+  const now = Date.now();
+  bars.forEach((bar, i) => {
+    // Same level for every bar (it's one mic, not a spectrum), but a
+    // per-bar phase offset on top of it so they don't move in lockstep —
+    // reads as "alive" rather than a single meter drawn five times.
+    const wobble = 0.75 + 0.25 * Math.sin(now / 85 + i * 1.3);
+    const h = Math.max(0.12, Math.min(1, level * 3.4 * wobble));
+    bar.style.height = (h * 100) + '%';
+    bar.style.animation = 'none'; // override the canned barbounce keyframe while we're driving this live
+  });
+  micRafId = requestAnimationFrame(driveWaveformLive);
+}
+
+function stopWaveformLive() {
+  if (micRafId) cancelAnimationFrame(micRafId);
+  micRafId = null;
+  micAnalyser = null;
+  // Hand height/animation control back to the CSS keyframe (used for the
+  // Pi mic's "recording" phase, which has no client-side audio to read).
+  document.querySelectorAll('#waveform span').forEach(bar => {
+    bar.style.height = '';
+    bar.style.animation = '';
+  });
 }
 
 function stopTalking() {
@@ -515,6 +674,7 @@ function stopTalking() {
   pttHeld = false;
   document.getElementById('ptt-button').classList.remove('held');
   const hadRealRecording = !!micWs; // false if released during the getUserMedia permission prompt, or on denial
+  stopWaveformLive();
   if (micWs) { try { micWs.close(); } catch (e) {} micWs = null; }
   if (micAudioCtx) { try { micAudioCtx.close(); } catch (e) {} micAudioCtx = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
