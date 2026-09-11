@@ -45,7 +45,7 @@ RETENTION_DAYS = config.METRICS_RETENTION_DAYS
 
 @dataclass
 class Call:
-    source: str  # "openrouter" or "claude-code"
+    source: str  # "openrouter", "claude-code", or "groq"
     model: str
     input_tokens: int
     output_tokens: int
@@ -207,7 +207,8 @@ def _by_user(conn, since: float, balances: dict) -> list[dict]:
                COALESCE(SUM(input_tokens + output_tokens)
                             FILTER (WHERE ts > :since), 0)              AS total_tokens,
                COALESCE(SUM(cost_usd) FILTER (WHERE source = 'claude-code'), 0) AS cc_cost,
-               COALESCE(SUM(cost_usd) FILTER (WHERE source = 'openrouter'), 0)  AS or_cost
+               COALESCE(SUM(cost_usd) FILTER (WHERE source = 'openrouter'), 0)  AS or_cost,
+               COALESCE(SUM(cost_usd) FILTER (WHERE source = 'groq'), 0)        AS groq_cost
         FROM calls
         GROUP BY user_id
         """,
@@ -219,9 +220,10 @@ def _by_user(conn, since: float, balances: dict) -> list[dict]:
         user_id = row["user_id"]
         cc = row["cc_cost"] + balances.get(("claude-code", user_id), 0.0)
         orc = row["or_cost"] + balances.get(("openrouter", user_id), 0.0)
+        groq = row["groq_cost"] + balances.get(("groq", user_id), 0.0)
         # A user with no activity in the window and no spend at all has
         # nothing to show; keep them out rather than listing an empty row.
-        if not row["calls"] and not cc and not orc:
+        if not row["calls"] and not cc and not orc and not groq:
             continue
         out.append(
             {
@@ -230,6 +232,7 @@ def _by_user(conn, since: float, balances: dict) -> list[dict]:
                 "total_tokens": row["total_tokens"],
                 "claude_code_cost_usd": round(cc, 4),
                 "openrouter_cost_usd": round(orc, 4),
+                "groq_cost_usd": round(groq, 4),
             }
         )
     out.sort(key=lambda r: r["total_tokens"], reverse=True)
@@ -270,6 +273,7 @@ def snapshot() -> dict:
 
     claude_code_cost = (spend.get("claude-code") or 0.0) + balances.get(("claude-code", None), 0.0)
     openrouter_cost = (spend.get("openrouter") or 0.0) + balances.get(("openrouter", None), 0.0)
+    groq_cost = (spend.get("groq") or 0.0) + balances.get(("groq", None), 0.0)
     total_input = totals["total_input_tokens"]
     total_output = totals["total_output_tokens"]
 
@@ -286,6 +290,7 @@ def snapshot() -> dict:
         "recent": [_row_dict(r) for r in recent],
         "claude_code_cost_usd": round(claude_code_cost, 4),
         "openrouter_cost_usd": round(openrouter_cost, 4),
+        "groq_cost_usd": round(groq_cost, 4),
         "by_user": by_user,
     }
 
@@ -304,5 +309,6 @@ def _empty_snapshot() -> dict:
         "recent": [],
         "claude_code_cost_usd": 0.0,
         "openrouter_cost_usd": 0.0,
+        "groq_cost_usd": 0.0,
         "by_user": [],
     }

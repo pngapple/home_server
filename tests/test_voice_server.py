@@ -110,6 +110,39 @@ def test_fast_path_dispatches_directly_without_the_llm(voice_secret, monkeypatch
     assert calls == [("set_plug_power", {"device": "desk lights", "state": "on"})]
 
 
+def test_fast_path_dispatch_runs_off_the_event_loop(voice_secret, monkeypatch):
+    """set_plug_power (bot/tools/kasa.py) does asyncio.run() internally,
+    which raises "cannot be called from a running event loop" if invoked
+    directly from this async handler instead of via asyncio.to_thread. This
+    is a real bug that happened: a voice command failed with exactly that
+    traceback because the fast path called dispatch_result() straight from
+    the coroutine. Deliberately does NOT monkeypatch dispatch_result, so it
+    exercises the real call path down into kasa.py's asyncio.run()."""
+    from bot.tools import kasa
+
+    monkeypatch.setattr(config, "KASA_USERNAME", "u")
+    monkeypatch.setattr(config, "KASA_PASSWORD", "p")
+    monkeypatch.setattr(kasa, "_CACHE", {})
+    monkeypatch.setattr(kasa, "_CACHE_TS", 0.0)
+    monkeypatch.setattr(kasa, "_UNREACHABLE", ())
+
+    async def fake_discover(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(kasa.Discover, "discover", fake_discover)
+
+    resp = run(
+        voice_server.handle_command(
+            FakeRequest({"secret": voice_secret, "transcript": "turn off Max desk lights"})
+        )
+    )
+
+    assert resp.status == 200
+    body = run(resp_json(resp))
+    assert "failed unexpectedly" not in body["reply"]
+    assert "no plug named" in body["reply"]
+
+
 def test_fallback_path_goes_through_ask_llm(voice_secret, monkeypatch):
     def fake_dispatch_result(name, arguments, ctx):
         raise AssertionError("no plug command was said, dispatch_result must not run")

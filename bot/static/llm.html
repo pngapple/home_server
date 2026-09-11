@@ -17,6 +17,7 @@
     --border:         rgba(255,255,255,0.08);
     --series-1:       #5b9df9;
     --series-2:       #f5a35b;
+    --series-3:       #b880f0;
     --good:           #35c987;
     --shadow:         0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -12px rgba(0,0,0,0.6);
   }
@@ -33,6 +34,7 @@
       --border:         rgba(11,11,11,0.08);
       --series-1:       #2a6fd6;
       --series-2:       #d9702a;
+      --series-3:       #8a3fd1;
       --good:           #1f9e5e;
       --shadow:         0 1px 2px rgba(20,20,20,0.05), 0 8px 24px -14px rgba(20,20,20,0.15);
     }
@@ -98,6 +100,7 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
   .dot.openrouter { background: var(--series-1); }
   .dot.claude-code { background: var(--series-2); }
+  .dot.groq { background: var(--series-3); }
 
   .chart-wrap { width: 100%; overflow: hidden; }
   #chart { width: 100%; height: 110px; display: block; overflow: visible; }
@@ -124,6 +127,7 @@
   }
   .badge.openrouter { background: color-mix(in srgb, var(--series-1) 16%, transparent); color: var(--series-1); }
   .badge.claude-code { background: color-mix(in srgb, var(--series-2) 16%, transparent); color: var(--series-2); }
+  .badge.groq { background: color-mix(in srgb, var(--series-3) 16%, transparent); color: var(--series-3); }
 
   .bar { height: 5px; border-radius: 3px; background: var(--gridline); margin-top: 0.65em; overflow: hidden; }
   .bar-fill { height: 100%; border-radius: 3px; background: var(--series-1); transition: width 0.4s ease; }
@@ -151,6 +155,7 @@
       <div class="bar" id="t-or-bar-wrap"><div class="bar-fill" id="t-or-bar" style="width:0%"></div></div>
     </div>
     <div class="tile"><div class="label">Claude Code spend</div><div class="value" id="t-cc-cost">–</div><div class="sub">since last restart</div></div>
+    <div class="tile"><div class="label">Groq spend</div><div class="value" id="t-groq-cost">–</div><div class="sub">Whisper transcription, since last restart</div></div>
   </div>
 
   <div class="panel">
@@ -158,6 +163,7 @@
     <div class="legend">
       <span><span class="dot openrouter"></span>OpenRouter chat</span>
       <span><span class="dot claude-code"></span>Claude Code bridge</span>
+      <span><span class="dot groq"></span>Groq transcription</span>
     </div>
     <div class="chart-wrap" id="chart-wrap"></div>
   </div>
@@ -208,6 +214,7 @@ function renderChart(recent) {
   const colors = {
     openrouter: style.getPropertyValue('--series-1').trim(),
     'claude-code': style.getPropertyValue('--series-2').trim(),
+    groq: style.getPropertyValue('--series-3').trim(),
   };
   let bars = data.map((c, i) => {
     const h = Math.max(2, (c.tokens_per_sec / maxTps) * (H - PAD_B));
@@ -250,6 +257,7 @@ function render(data) {
     document.getElementById('t-or-bar-wrap').style.display = 'none';
   }
   document.getElementById('t-cc-cost').textContent = '$' + (data.claude_code_cost_usd || 0).toFixed(3);
+  document.getElementById('t-groq-cost').textContent = '$' + (data.groq_cost_usd || 0).toFixed(3);
 
   renderChart(data.recent);
 
@@ -264,11 +272,12 @@ function render(data) {
         <td class="num">${fmtCompact(u.total_tokens)}</td>
         <td class="num">${u.openrouter_cost_usd ? '$' + u.openrouter_cost_usd.toFixed(3) : '–'}</td>
         <td class="num">${u.claude_code_cost_usd ? '$' + u.claude_code_cost_usd.toFixed(3) : '–'}</td>
+        <td class="num">${u.groq_cost_usd ? '$' + u.groq_cost_usd.toFixed(3) : '–'}</td>
       </tr>`).join('');
     uwrap.innerHTML = `<table>
       <thead><tr>
         <th>User</th><th class="num">Requests</th><th class="num">Tokens</th>
-        <th class="num">OpenRouter cost</th><th class="num">Claude Code spend</th>
+        <th class="num">OpenRouter cost</th><th class="num">Claude Code spend</th><th class="num">Groq spend</th>
       </tr></thead>
       <tbody>${urows}</tbody>
     </table>`;
@@ -282,7 +291,7 @@ function render(data) {
   let rows = data.recent.map(c => `
     <tr>
       <td class="time">${fmtTime(c.timestamp)}</td>
-      <td><span class="badge ${c.source}"><span class="dot ${c.source}"></span>${c.source === 'openrouter' ? 'OpenRouter' : 'Claude Code'}</span></td>
+      <td><span class="badge ${c.source}"><span class="dot ${c.source}"></span>${({openrouter: 'OpenRouter', 'claude-code': 'Claude Code', groq: 'Groq'})[c.source] || c.source}</span></td>
       <td>${c.model}</td>
       <td class="num">${c.input_tokens.toLocaleString()}</td>
       <td class="num">${c.output_tokens.toLocaleString()}</td>

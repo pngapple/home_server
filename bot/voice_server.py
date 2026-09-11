@@ -30,8 +30,8 @@ import re
 
 from aiohttp import web
 
-from . import cards, config, notify, webserver
-from .discord_client import client
+from . import cards, config, metrics, notify, webserver
+from .discord_client import client, display_name
 from .llm import ask_llm
 from .tools import ToolContext, dispatch_result
 
@@ -113,11 +113,35 @@ async def handle_command(request: web.Request) -> web.Response:
     roles = frozenset({config.HOUSEHOLD_ROLE_NAME, config.ADMIN_ROLE_NAME})
     message = _FakeMessage(author, _VOICE_CHANNEL_ID)
 
+    # The listener includes these whenever it successfully transcribed via
+    # Groq (i.e. always, on this path) — recorded the same way llm.py logs
+    # OpenRouter spend, so Groq shows up in the same `calls` table/dashboard
+    # instead of being invisible cost. Missing/old listener build: skip
+    # rather than record a bogus zero-cost row.
+    stt_duration_s = body.get("stt_duration_s")
+    if stt_duration_s is not None:
+        await asyncio.to_thread(
+            metrics.record,
+            source="groq",
+            model=str(body.get("stt_model", "")),
+            input_tokens=0,
+            output_tokens=0,
+            duration_s=float(stt_duration_s),
+            user_id=owner_id,
+            user_name=display_name(author),
+            cost_usd=float(body.get("stt_cost_usd", 0.0)),
+        )
+
     plug_command = match_plug_command(transcript)
     if plug_command is not None:
         device, state = plug_command
         ctx = ToolContext(message=message, roles=roles)
-        reply = dispatch_result("set_plug_power", {"device": device, "state": state}, ctx).content
+        # set_plug_power calls asyncio.run() internally (see tools/kasa.py),
+        # which raises if it's already on a running loop — this handler is a
+        # coroutine on the aiohttp/Discord loop, so the dispatch has to be
+        # pushed to a worker thread, same as the ask_llm() fallback below.
+        result = await asyncio.to_thread(dispatch_result, "set_plug_power", {"device": device, "state": state}, ctx)
+        reply = result.content
     else:
         reply = await asyncio.to_thread(ask_llm, message, transcript, roles)
 

@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew the Tailscale HTTPS cert nginx serves
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/mjxu/home_server/scripts/tailscale-cert-renew.sh
