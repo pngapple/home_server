@@ -34,6 +34,16 @@ VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", f"http://127.0.0.1:{VOICE_
 VOICE_STATUS_SERVER_PORT = int(os.environ.get("VOICE_STATUS_SERVER_PORT", "8795"))
 VOICE_STATUS_URL = os.environ.get("VOICE_STATUS_URL", f"http://127.0.0.1:{VOICE_STATUS_SERVER_PORT}/api/status")
 
+# WebSocket server (browser_mic.py) that a browser tab streams raw mic audio
+# to when the /voice/ dashboard's "use this mic too" toggle is on — nginx
+# proxies /voice/mic-ws here (with Upgrade headers) alongside the dashboard
+# itself. No secret: unlike VOICE_SERVER_SECRET (which lets a caller skip
+# straight to a finished command), a stream arriving here still has to pass
+# speaker verification like any other audio before it can do anything, so
+# it only needs the same access Tailscale already grants to view the
+# dashboard page at all — see browser_mic.py's docstring.
+BROWSER_MIC_WS_PORT = int(os.environ.get("BROWSER_MIC_WS_PORT", "8796"))
+
 # Cloud Whisper transcription for the short post-wake-word clip only — see
 # the plan doc for why this isn't OpenRouter (no STT endpoint) and why Groq
 # specifically (fast hosted Whisper, matters for the "make it quicker" goal).

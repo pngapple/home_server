@@ -72,6 +72,24 @@
   }
   #audio-enable:hover { background: var(--surface-2); }
 
+  .mic-toggle-row { display: flex; align-items: center; gap: 0.7em; margin: 0 0 0.5em; }
+  .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch-track {
+    position: absolute; inset: 0; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 999px; transition: background 0.2s ease; cursor: pointer;
+  }
+  .switch-thumb {
+    position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+    background: var(--text-primary); border-radius: 50%; transition: transform 0.2s ease;
+  }
+  .switch input:checked + .switch-track { background: var(--good); }
+  .switch input:checked + .switch-track .switch-thumb { transform: translateX(16px); }
+  .switch input:disabled + .switch-track { opacity: 0.4; cursor: not-allowed; }
+  #mic-toggle-label { font-size: 0.85em; color: var(--text-secondary); }
+  .mic-note { font-size: 0.78em; color: var(--text-muted); margin: 0 0 1.5em; max-width: 30em; }
+  .mic-note.error { color: var(--danger); }
+
   .panel {
     background: var(--surface-1);
     border: 1px solid var(--border);
@@ -178,6 +196,15 @@
   <p class="subtitle">what the wake-word listener is doing right now</p>
   <button id="audio-enable" hidden>🔈 Tap to enable spoken replies</button>
 
+  <div class="mic-toggle-row">
+    <label class="switch">
+      <input type="checkbox" id="mic-toggle">
+      <span class="switch-track"><span class="switch-thumb"></span></span>
+    </label>
+    <span id="mic-toggle-label">Use this device's mic too</span>
+  </div>
+  <div class="mic-note" id="mic-note" hidden></div>
+
   <div class="panel">
     <div class="orb-wrap">
       <div class="orb-stage" id="orb-stage" data-phase="offline">
@@ -228,7 +255,8 @@ function fmtElapsed(s) {
 }
 
 let current = null; // last-rendered snapshot, so the per-second clock tick doesn't need another fetch
-let lastAudioId = 0; // 0 never matches a real id (server starts counting at 1 on first clip)
+let lastAudioId = null; // null until the first poll — see applyPhase: whatever's already there when the page opens is not "new"
+let audioUnlocked = false; // true once any play() has actually succeeded on this page load
 
 function playPendingAudio() {
   const player = document.getElementById('player');
@@ -237,6 +265,7 @@ function playPendingAudio() {
   if (p && p.catch) {
     p.then(() => {
       lastAudioId = current.audio_id;
+      audioUnlocked = true;
       document.getElementById('audio-enable').hidden = true;
     }).catch(() => {
       // Autoplay blocked until the page has seen a user gesture — leave
@@ -250,9 +279,21 @@ function playPendingAudio() {
 document.getElementById('audio-enable').addEventListener('click', () => {
   if (current) playPendingAudio();
 });
+// Any interaction with the page at all counts as the unlock gesture, not
+// just the dedicated button — browsers only need one real user gesture per
+// page load before programmatic play() stops being blocked, so the first
+// click/tap/key anywhere quietly satisfies that instead of making you find
+// and hit a specific button.
+document.addEventListener('pointerdown', () => {
+  if (!audioUnlocked && current && current.audio_id && current.audio_id !== lastAudioId) playPendingAudio();
+}, { once: true });
+document.addEventListener('keydown', () => {
+  if (!audioUnlocked && current && current.audio_id && current.audio_id !== lastAudioId) playPendingAudio();
+}, { once: true });
 
 function applyPhase(data) {
-  const isNewAudio = data.audio_id && data.audio_id !== lastAudioId;
+  const isNewAudio = lastAudioId !== null && data.audio_id && data.audio_id !== lastAudioId;
+  if (lastAudioId === null) lastAudioId = data.audio_id; // baseline on first poll — don't replay old replies on load
   current = data;
   if (isNewAudio) playPendingAudio();
   const spec = PHASES[data.phase] || PHASES.offline;
@@ -264,7 +305,16 @@ function applyPhase(data) {
   stage.style.setProperty('--phase-color', color);
   document.getElementById('phase-label').textContent = spec.label;
   document.getElementById('phase-label').style.color = color;
-  document.getElementById('phase-detail').innerHTML = escapeHtml(spec.detail(data.detail || {}));
+  let detailText = spec.detail(data.detail || {});
+  const src = (data.detail || {}).source;
+  // pi_mic never needs calling out — it's the default/only source most of
+  // the time. A browser source is the interesting case ("closest mic wins"
+  // made visible) — but with multiple devices possibly connected, it may
+  // not be *this* viewer's device, so this doesn't claim "this device".
+  if (src && src.startsWith('browser:') && !['listening', 'offline'].includes(data.phase)) {
+    detailText += (detailText ? ' ' : '') + '— heard via a browser mic';
+  }
+  document.getElementById('phase-detail').innerHTML = escapeHtml(detailText);
   document.getElementById('waveform').classList.toggle('show', !!spec.waveform);
 
   const live = document.getElementById('live');
@@ -286,6 +336,98 @@ async function poll() {
 poll();
 setInterval(poll, 1500);
 setInterval(tickClock, 1000);
+
+// --- Browser mic: streams raw 16kHz mono PCM to voice/browser_mic.py,
+// which hands it to its own instance of the exact same wake-word pipeline
+// the Pi's mic runs — see that module's docstring for why nothing here
+// tries to detect "hey jarvis" itself. Requires a secure context (HTTPS,
+// or localhost) — every browser refuses getUserMedia() otherwise, which is
+// the expected failure mode until Tailscale HTTPS certs are set up for
+// this tailnet.
+let micStream = null, micAudioCtx = null, micWs = null;
+
+function micNote(text, isError) {
+  const el = document.getElementById('mic-note');
+  el.textContent = text;
+  el.classList.toggle('error', !!isError);
+  el.hidden = !text;
+}
+
+async function enableBrowserMic() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    micNote('This page needs HTTPS (or localhost) for microphone access — plain http:// isn’t allowed by the browser.', true);
+    return false;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (e) {
+    micNote('Microphone access denied or unavailable (' + e.message + ').', true);
+    return false;
+  }
+
+  const wsUrl = new URL('mic-ws', document.baseURI);
+  wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  micWs = new WebSocket(wsUrl);
+  micWs.binaryType = 'arraybuffer';
+
+  // AudioContext({sampleRate: 16000}) does the resample from whatever the
+  // hardware actually captures at — openWakeWord/Whisper both need 16kHz,
+  // same as the Pi's own capture path (see audio.py).
+  micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const source = micAudioCtx.createMediaStreamSource(micStream);
+  // ScriptProcessorNode is deprecated in favor of AudioWorklet, but is far
+  // simpler for a single-file page (no separate worklet module to load)
+  // and is still supported everywhere it's deprecated, which is what a
+  // small, infrequently-touched capture path like this one should
+  // optimize for over using the newer API.
+  const processor = micAudioCtx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (e) => {
+    if (!micWs || micWs.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const pcm16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    micWs.send(pcm16.buffer);
+  };
+  // ScriptProcessorNode only fires reliably once connected through to a
+  // destination — routed through a muted gain node so the mic is never
+  // actually played back out the speakers (which would just be feedback).
+  const muteGain = micAudioCtx.createGain();
+  muteGain.gain.value = 0;
+  source.connect(processor);
+  processor.connect(muteGain);
+  muteGain.connect(micAudioCtx.destination);
+
+  micWs.addEventListener('close', () => micNote('Mic connection lost — toggle off and on to retry.', true));
+  micWs.addEventListener('error', () => micNote('Could not reach the voice listener for mic streaming.', true));
+  micNote('');
+  return true;
+}
+
+function disableBrowserMic() {
+  if (micWs) { try { micWs.close(); } catch (e) {} micWs = null; }
+  if (micAudioCtx) { try { micAudioCtx.close(); } catch (e) {} micAudioCtx = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  micNote('');
+}
+
+document.getElementById('mic-toggle').addEventListener('change', async (e) => {
+  if (e.target.checked) {
+    e.target.disabled = true;
+    const ok = await enableBrowserMic();
+    e.target.disabled = false;
+    if (!ok) e.target.checked = false;
+  } else {
+    disableBrowserMic();
+  }
+});
+// Mic access is opt-in every page load (no persisted "was it on" state) —
+// getUserMedia can't be granted silently anyway, so there's nothing to
+// gain from remembering the toggle position versus just defaulting off.
 </script>
 </body>
 </html>

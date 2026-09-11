@@ -11,3 +11,4 @@ resemblyzer>=0.1.4
 requests>=2.31
 python-dotenv>=1.0
 piper-tts>=1.8
+websockets>=12
