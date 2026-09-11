@@ -15,6 +15,14 @@ WorkingDirectory=/home/mjxu/home_server
 # openWakeWord/Whisper need ("Invalid sample rate" from PortAudio) — pulse's
 # resampling is what makes 16kHz work at all.
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+# The USB dongle mic's raw signal is very quiet even close up (measured
+# -19dBFS peak at 100% volume during normal speech) — quiet enough to hurt
+# both wake-word scoring and Whisper accuracy, and to make short pauses
+# misread as silence. +10.6dB of PipeWire software gain (150%) fixed it
+# (measured -8.4dBFS peak afterward, still zero clipping; +20dB/220%
+# started clipping). `-` prefix: don't block startup if the source is ever
+# renamed/missing, since this is a quality tweak, not a hard requirement.
+ExecStartPre=-/usr/bin/pactl -- set-source-volume alsa_input.usb-C-Media_Electronics_Inc._USB_PnP_Sound_Device-00.analog-mono 150%
 EnvironmentFile=/home/mjxu/home_server/.env
 ExecStart=/home/mjxu/home_server/voice/venv/bin/python3 -m voice.listen
 Restart=on-failure
