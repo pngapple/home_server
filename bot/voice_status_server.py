@@ -24,12 +24,21 @@ transcript archive (bot/voice_server.py's DM to the owner is that record).
 `audio_id` is a monotonic counter, not a hash or timestamp of the clip
 itself, so the dashboard can cheaply tell "there's a new clip" from "same
 clip, poll again" without re-fetching audio bytes on every tick.
+
+`_history` is a short, separate record of finished turns (replied/rejected/
+error only — not the in-between phases like "transcribing", which are
+live-progress noise once the turn is over, not something worth remembering)
+so the dashboard can show what happened recently instead of only ever the
+current instant. Bounded and in-memory for the same reason `_state` is:
+this is a glance-at-it dashboard, not an audit log — bot/voice_server.py's
+DM to the owner is still the durable record of every command.
 """
 
 import base64
 import hmac
 import logging
 import time
+from collections import deque
 
 from aiohttp import web
 
@@ -43,6 +52,13 @@ log = logging.getLogger("discord-llm-bot.voice_status_server")
 # flap the dashboard to "offline" and back.
 _STALE_S = 45.0
 
+# Phases worth a line in the activity feed — the terminal outcome of a
+# turn, not the mechanical steps (awoken/recording/transcribing/sending)
+# that led up to it. Those still drive the live orb via _state, just not
+# _history.
+_HISTORY_PHASES = frozenset({"replied", "rejected", "error"})
+_HISTORY_MAXLEN = 20
+
 _state = {
     "phase": "offline",
     "detail": {},
@@ -50,6 +66,8 @@ _state = {
     "phase_since": 0.0,
     "audio_id": 0,
 }
+
+_history: deque = deque(maxlen=_HISTORY_MAXLEN)
 
 _audio: bytes | None = None
 
@@ -70,6 +88,8 @@ async def handle_get_status(request: web.Request) -> web.Response:
             "updated_at": _state["updated_at"],
             "phase_since": _state["phase_since"],
             "audio_id": _state["audio_id"],
+            # Newest-first, matching llm.html's "recent" convention.
+            "history": list(reversed(_history)),
         }
     )
 
@@ -101,8 +121,12 @@ async def handle_post_status(request: web.Request) -> web.Response:
     if phase != _state["phase"]:
         _state["phase_since"] = now
     _state["phase"] = phase
-    _state["detail"] = body.get("detail") or {}
+    detail = body.get("detail") or {}
+    _state["detail"] = detail
     _state["updated_at"] = now
+
+    if phase in _HISTORY_PHASES:
+        _history.append({"ts": now, "phase": phase, "detail": detail})
 
     audio_b64 = body.get("audio_b64")
     if audio_b64:

@@ -72,11 +72,12 @@
   }
   #audio-enable:hover { background: var(--surface-2); }
 
-  .ptt-row { display: flex; align-items: center; gap: 0.9em; margin: 0 0 0.5em; }
+  .ptt-divider { height: 1px; background: var(--border); margin: 1.8em 0 1.6em; }
+  .ptt-row { display: flex; align-items: center; gap: 1em; }
   #ptt-button {
     display: flex; align-items: center; justify-content: center;
     width: 52px; height: 52px; flex: none; border-radius: 50%;
-    background: var(--surface-1); border: 1px solid var(--border);
+    background: var(--surface-2); border: 1px solid var(--border);
     color: var(--text-primary); font-size: 1.3em; cursor: pointer;
     user-select: none; -webkit-user-select: none; touch-action: none;
     transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
@@ -87,8 +88,9 @@
     box-shadow: 0 0 0 8px color-mix(in srgb, var(--danger) 20%, transparent);
   }
   #ptt-button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ptt-text { min-width: 0; }
   #ptt-label { font-size: 0.85em; color: var(--text-secondary); }
-  .mic-note { font-size: 0.78em; color: var(--text-muted); margin: 0 0 1.5em; max-width: 30em; }
+  .mic-note { font-size: 0.78em; color: var(--text-muted); margin-top: 0.3em; }
   .mic-note.error { color: var(--danger); }
 
   .panel {
@@ -97,7 +99,38 @@
     border-radius: 16px;
     padding: 2.4em 1.5em 2em;
     box-shadow: var(--shadow);
+    margin-bottom: 1.4em;
   }
+  .panel:last-child { margin-bottom: 0; }
+  h2 { font-size: 0.92em; color: var(--text-primary); font-weight: 700; margin: 0 0 1.1em; }
+  .empty { color: var(--text-muted); font-size: 0.86em; padding: 0.5em 0; margin: 0; }
+
+  .history-item {
+    display: flex; gap: 0.8em; padding: 0.85em 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .history-item:last-child { border-bottom: none; padding-bottom: 0; }
+  .history-item:first-child { padding-top: 0; }
+  .history-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
+    margin-top: 0.5em;
+  }
+  .history-dot.replied { background: var(--good); }
+  .history-dot.rejected { background: var(--warn); }
+  .history-dot.error { background: var(--danger); }
+  .history-body { min-width: 0; flex: 1; }
+  .history-top {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 0.8em;
+    font-size: 0.78em; color: var(--text-muted); margin-bottom: 0.3em;
+  }
+  .history-source { white-space: nowrap; }
+  .history-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .history-text {
+    font-size: 0.9em; color: var(--text-secondary); line-height: 1.5;
+    overflow-wrap: break-word;
+  }
+  .history-text .transcript { color: var(--text-primary); }
+  .history-text .arrow { color: var(--text-muted); margin: 0 0.35em; }
 
   .orb-wrap { display: flex; flex-direction: column; align-items: center; }
   .orb-stage {
@@ -197,12 +230,6 @@
   <p class="subtitle">what the wake-word listener is doing right now</p>
   <button id="audio-enable" hidden>🔈 Tap to enable spoken replies</button>
 
-  <div class="ptt-row">
-    <button id="ptt-button" type="button" aria-label="Hold to talk">🎤</button>
-    <span id="ptt-label">Hold to talk from this device</span>
-  </div>
-  <div class="mic-note" id="mic-note" hidden></div>
-
   <div class="panel">
     <div class="orb-wrap">
       <div class="orb-stage" id="orb-stage" data-phase="offline">
@@ -218,6 +245,21 @@
       <div class="phase-since" id="phase-since"></div>
       <div class="phase-detail" id="phase-detail"></div>
     </div>
+
+    <div class="ptt-divider"></div>
+
+    <div class="ptt-row">
+      <button id="ptt-button" type="button" aria-label="Hold to talk">🎤</button>
+      <div class="ptt-text">
+        <div id="ptt-label">Hold to talk from this device</div>
+        <div class="mic-note" id="mic-note" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent activity</h2>
+    <div id="history-wrap"><p class="empty">Nothing yet this session.</p></div>
   </div>
 </div>
 <audio id="player" hidden></audio>
@@ -290,11 +332,60 @@ document.addEventListener('keydown', () => {
   if (!audioUnlocked && current && current.audio_id && current.audio_id !== lastAudioId) playPendingAudio();
 }, { once: true });
 
+function sourceLabel(source) {
+  if (!source) return '';
+  if (source === 'pi_mic') return 'Pi mic';
+  if (source.startsWith('browser_ptt:')) return 'Browser mic'; // no need to show the raw ip:port
+  return source;
+}
+function fmtRelative(ts) {
+  const s = Date.now() / 1000 - ts;
+  if (s < 45) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+function renderHistory(history) {
+  const wrap = document.getElementById('history-wrap');
+  if (!history || !history.length) {
+    wrap.innerHTML = '<p class="empty">Nothing yet this session.</p>';
+    return;
+  }
+  wrap.innerHTML = history.map(h => {
+    const d = h.detail || {};
+    let text;
+    if (h.phase === 'replied') {
+      text = (d.transcript ? '<span class="transcript">“' + escapeHtml(d.transcript) + '”</span>' : '')
+           + (d.reply ? '<span class="arrow">→</span>' + escapeHtml(d.reply) : '');
+    } else if (h.phase === 'rejected') {
+      text = d.reason === 'speaker mismatch'
+        ? 'Ignored — voice didn’t match (score ' + (d.score != null ? d.score.toFixed(2) : '?') + ')'
+        : 'Ignored — ' + escapeHtml(d.reason || 'no command heard');
+    } else {
+      text = 'Error — ' + escapeHtml(d.reason || 'something went wrong')
+           + (d.transcript ? ' (heard: “' + escapeHtml(d.transcript) + '”)' : '');
+    }
+    return '<div class="history-item">'
+      + '<span class="history-dot ' + h.phase + '"></span>'
+      + '<div class="history-body">'
+      + '<div class="history-top">'
+      + '<span class="history-source">' + escapeHtml(sourceLabel(d.source)) + '</span>'
+      + '<span class="history-time">' + escapeHtml(fmtRelative(h.ts)) + '</span>'
+      + '</div>'
+      + '<div class="history-text">' + text + '</div>'
+      + '</div></div>';
+  }).join('');
+}
+
 function applyPhase(data) {
   const isNewAudio = lastAudioId !== null && data.audio_id && data.audio_id !== lastAudioId;
   if (lastAudioId === null) lastAudioId = data.audio_id; // baseline on first poll — don't replay old replies on load
   current = data;
   if (isNewAudio) playPendingAudio();
+  // Local optimistic updates (startTalking/stopTalking) don't carry a
+  // history array — only real server responses do — so this leaves
+  // whatever was last rendered alone rather than blanking the feed.
+  if (data.history) renderHistory(data.history);
   const spec = PHASES[data.phase] || PHASES.offline;
   const stage = document.getElementById('orb-stage');
   const style = getComputedStyle(document.querySelector('.viz-root'));
