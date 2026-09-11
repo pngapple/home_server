@@ -31,6 +31,11 @@ log = logging.getLogger("voice.listen")
 # recorded as "urn on the desk lights."
 _PREROLL_FRAMES = 5  # ~400ms at FRAME_MS=80
 
+# Floor for the near-trigger log line below — low enough to catch "it heard
+# something wake-word-shaped but not enough," high enough that background
+# noise/normal speech doesn't spam the log every frame.
+_NEAR_TRIGGER_LOG_THRESHOLD = 0.15
+
 
 def _rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(frame))))
@@ -62,11 +67,20 @@ def _record_command(frames, preroll: collections.deque) -> np.ndarray:
     return np.concatenate(collected)
 
 
-def _send_command(transcript: str) -> str | None:
+def _send_command(result: stt.Transcription) -> str | None:
     try:
         resp = requests.post(
             config.VOICE_SERVER_URL,
-            json={"secret": config.VOICE_SERVER_SECRET, "transcript": transcript},
+            json={
+                "secret": config.VOICE_SERVER_SECRET,
+                "transcript": result.text,
+                # So the bot can log this as a metrics.py `calls` row
+                # (source="groq") the same way it already does OpenRouter
+                # spend — see bot/voice_server.py.
+                "stt_model": config.GROQ_STT_MODEL,
+                "stt_duration_s": result.duration_s,
+                "stt_cost_usd": result.cost_usd,
+            },
             timeout=30,
         )
         resp.raise_for_status()
@@ -91,6 +105,13 @@ def run() -> None:
         score = prediction.get(wake_word_name, 0.0)
         preroll.append(frame)
 
+        # A near-miss is exactly what calibration (see train.md) needs to
+        # see — logging only real triggers left no way to tell "it's not
+        # hearing me at all" apart from "it heard me, scored 0.3, and the
+        # threshold is just a bit too high."
+        if score >= _NEAR_TRIGGER_LOG_THRESHOLD:
+            log.info("Near-trigger score=%.2f (threshold=%.2f)", score, config.WAKE_WORD_THRESHOLD)
+
         if score < config.WAKE_WORD_THRESHOLD:
             continue
 
@@ -104,13 +125,13 @@ def run() -> None:
         if not matched:
             continue
 
-        transcript = stt.transcribe(command_audio)
-        if not transcript:
+        result = stt.transcribe(command_audio)
+        if not result.text:
             log.info("Empty transcript, ignoring")
             continue
-        log.info("Transcript: %r", transcript)
+        log.info("Transcript: %r (audio=%.1fs, cost=$%.5f)", result.text, result.duration_s, result.cost_usd)
 
-        reply = _send_command(transcript)
+        reply = _send_command(result)
         if reply is not None:
             log.info("Reply: %s", reply)
             tts.speak(reply)
