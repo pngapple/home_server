@@ -8,6 +8,13 @@ Requires=discord-llm-bot.service
 Type=simple
 User=mjxu
 WorkingDirectory=/home/mjxu/home_server
+# This is a system unit, so it doesn't inherit the user session's
+# XDG_RUNTIME_DIR/PulseAudio socket by default. Without it, PortAudio can't
+# reach the user's PulseAudio session and falls back to the raw ALSA
+# hardware device, which fails to open the USB mic at the 16kHz
+# openWakeWord/Whisper need ("Invalid sample rate" from PortAudio) — pulse's
+# resampling is what makes 16kHz work at all.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 EnvironmentFile=/home/mjxu/home_server/.env
 ExecStart=/home/mjxu/home_server/voice/venv/bin/python3 -m voice.listen
 Restart=on-failure
