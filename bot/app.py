@@ -41,6 +41,7 @@ from . import (
     permissions,
     users,
     voice_server,
+    voice_status_server,
 )
 from .discord_client import client, display_name
 from .llm import ask_llm
@@ -71,6 +72,7 @@ _SIDECARS = (
     ("Cigboard", cigboard_server.start),
     ("Geofence webhook", geofence_server.start),
     ("Voice command webhook", voice_server.start),
+    ("Voice status dashboard", voice_status_server.start),
 )
 
 

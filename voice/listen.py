@@ -14,6 +14,7 @@ between this process and bot/voice_server.py.
 
 import collections
 import logging
+import time
 
 import numpy as np
 import requests
@@ -35,6 +36,12 @@ _PREROLL_FRAMES = 5  # ~400ms at FRAME_MS=80
 # something wake-word-shaped but not enough," high enough that background
 # noise/normal speech doesn't spam the log every frame.
 _NEAR_TRIGGER_LOG_THRESHOLD = 0.15
+
+# How often to push a "still listening" ping to the dashboard
+# (bot/voice_status_server.py) while idle — frequent enough that "offline"
+# (see that module's _STALE_S) shows up reasonably fast if this process
+# dies, infrequent enough not to matter as network chatter.
+_HEARTBEAT_INTERVAL_S = 20.0
 
 
 def _rms(frame: np.ndarray) -> float:
@@ -90,6 +97,21 @@ def _send_command(result: stt.Transcription) -> str | None:
         return None
 
 
+def _report_status(phase: str, detail: dict | None = None) -> None:
+    """Best-effort push to the dashboard. Short timeout, swallows every
+    error — unlike _send_command's failure (which drops a real command),
+    a missed status ping is just a stale dashboard, never worth stalling
+    wake-word detection over."""
+    try:
+        requests.post(
+            config.VOICE_STATUS_URL,
+            json={"secret": config.VOICE_SERVER_SECRET, "phase": phase, "detail": detail or {}},
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+
 def run() -> None:
     log.info("Loading wake-word model from %s", config.WAKE_WORD_MODEL_PATH)
     oww = Model(wakeword_models=[config.WAKE_WORD_MODEL_PATH], inference_framework="onnx")
@@ -98,6 +120,8 @@ def run() -> None:
 
     preroll: collections.deque = collections.deque(maxlen=_PREROLL_FRAMES)
     frames = frame_stream()
+    _report_status("listening")
+    last_heartbeat = time.monotonic()
 
     for frame in frames:
         pcm16 = (np.clip(frame, -1.0, 1.0) * 32767).astype(np.int16)
@@ -113,28 +137,44 @@ def run() -> None:
             log.info("Near-trigger score=%.2f (threshold=%.2f)", score, config.WAKE_WORD_THRESHOLD)
 
         if score < config.WAKE_WORD_THRESHOLD:
+            now = time.monotonic()
+            if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
+                _report_status("listening")
+                last_heartbeat = now
             continue
 
         log.info("Wake word detected (score=%.2f) — recording command", score)
+        _report_status("awoken", {"score": round(float(score), 3)})
         oww.reset()
+        _report_status("recording")
         command_audio = _record_command(frames, preroll)
         preroll.clear()
 
         matched, sim_score = speaker.is_enrolled_speaker(command_audio)
         log.info("Speaker check: score=%.3f threshold=%.2f -> %s", sim_score, config.SPEAKER_THRESHOLD, "match" if matched else "REJECTED")
         if not matched:
+            _report_status("rejected", {"reason": "speaker mismatch", "score": round(float(sim_score), 3)})
+            last_heartbeat = time.monotonic()
             continue
 
+        _report_status("transcribing")
         result = stt.transcribe(command_audio)
         if not result.text:
             log.info("Empty transcript, ignoring")
+            _report_status("rejected", {"reason": "empty transcript"})
+            last_heartbeat = time.monotonic()
             continue
         log.info("Transcript: %r (audio=%.1fs, cost=$%.5f)", result.text, result.duration_s, result.cost_usd)
 
+        _report_status("sending", {"transcript": result.text})
         reply = _send_command(result)
         if reply is not None:
             log.info("Reply: %s", reply)
+            _report_status("replied", {"transcript": result.text, "reply": reply[:400]})
             tts.speak(reply)
+        else:
+            _report_status("error", {"reason": "webhook unreachable", "transcript": result.text})
+        last_heartbeat = time.monotonic()
 
 
 if __name__ == "__main__":

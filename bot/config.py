@@ -258,3 +258,10 @@ GEOFENCE_STATE_FILE = os.environ.get("GEOFENCE_STATE_FILE", "geofence_state.json
 # device itself). Same local-only-server pattern as the other sidecars.
 VOICE_SERVER_PORT = int(os.environ.get("VOICE_SERVER_PORT", "8794"))
 VOICE_SERVER_SECRET = os.environ.get("VOICE_SERVER_SECRET")
+
+# The live mic-activity dashboard (bot/voice_status_server.py). Separate
+# sidecar/port from VOICE_SERVER_PORT above on purpose: that one is the
+# command webhook, gated by VOICE_SERVER_SECRET and meant to stay
+# loopback-only; this one is a nginx-proxied page meant to be opened in a
+# browser, same pattern as LLM_STATUS_SERVER_PORT.
+VOICE_STATUS_SERVER_PORT = int(os.environ.get("VOICE_STATUS_SERVER_PORT", "8795"))

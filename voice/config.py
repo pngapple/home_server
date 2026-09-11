@@ -27,6 +27,13 @@ VOICE_SERVER_SECRET = _required("VOICE_SERVER_SECRET")
 VOICE_SERVER_PORT = int(os.environ.get("VOICE_SERVER_PORT", "8794"))
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", f"http://127.0.0.1:{VOICE_SERVER_PORT}/voice/command")
 
+# The bot's mic-activity dashboard (bot/voice_status_server.py) — must match
+# its VOICE_STATUS_SERVER_PORT. Status pushes reuse VOICE_SERVER_SECRET
+# rather than a second secret; this listener is the only thing that's ever
+# supposed to post here.
+VOICE_STATUS_SERVER_PORT = int(os.environ.get("VOICE_STATUS_SERVER_PORT", "8795"))
+VOICE_STATUS_URL = os.environ.get("VOICE_STATUS_URL", f"http://127.0.0.1:{VOICE_STATUS_SERVER_PORT}/api/status")
+
 # Cloud Whisper transcription for the short post-wake-word clip only — see
 # the plan doc for why this isn't OpenRouter (no STT endpoint) and why Groq
 # specifically (fast hosted Whisper, matters for the "make it quicker" goal).

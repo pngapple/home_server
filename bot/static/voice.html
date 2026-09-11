@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice status</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page:           #0a0c10;
+    --surface-1:      #14171d;
+    --surface-2:      #191d24;
+    --text-primary:   #eef0f3;
+    --text-secondary: #9aa1ac;
+    --text-muted:     #5d636e;
+    --border:         rgba(255,255,255,0.08);
+    --series-1:       #5b9df9;
+    --series-2:       #f5a35b;
+    --good:           #35c987;
+    --warn:           #e0b23c;
+    --danger:         #e5586a;
+    --shadow:         0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -12px rgba(0,0,0,0.6);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page:           #f7f7f5;
+      --surface-1:      #ffffff;
+      --surface-2:      #f0f0ee;
+      --text-primary:   #14161a;
+      --text-secondary: #55595f;
+      --text-muted:     #8b8f95;
+      --border:         rgba(11,11,11,0.08);
+      --series-1:       #2a6fd6;
+      --series-2:       #d9702a;
+      --good:           #1f9e5e;
+      --warn:           #a87a12;
+      --danger:         #c93a4e;
+      --shadow:         0 1px 2px rgba(20,20,20,0.05), 0 8px 24px -14px rgba(20,20,20,0.15);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 34em; margin: 0 auto; padding: 3em 1.5em 4em; }
+  .header { display: flex; align-items: baseline; gap: 0.7em; margin-bottom: 0.2em; }
+  h1 { font-size: 1.5em; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+  .live { display: inline-flex; align-items: center; gap: 0.45em; font-size: 0.76em; color: var(--text-muted); }
+  .live .pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--good);
+    box-shadow: 0 0 0 0 rgba(53,201,135,0.5);
+    animation: livepulse 2s infinite;
+  }
+  .live.offline .pulse { background: var(--danger); animation: none; box-shadow: none; }
+  @keyframes livepulse {
+    0%   { box-shadow: 0 0 0 0 rgba(53,201,135,0.45); }
+    70%  { box-shadow: 0 0 0 6px rgba(53,201,135,0); }
+    100% { box-shadow: 0 0 0 0 rgba(53,201,135,0); }
+  }
+  .subtitle { color: var(--text-secondary); font-size: 0.92em; margin: 0 0 1.5em; }
+
+  .panel {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 2.4em 1.5em 2em;
+    box-shadow: var(--shadow);
+  }
+
+  .orb-wrap { display: flex; flex-direction: column; align-items: center; }
+  .orb-stage {
+    --phase-color: var(--text-muted);
+    position: relative;
+    width: 200px; height: 200px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .orb-ring, .orb-ring-2 {
+    position: absolute; inset: 0; border-radius: 50%;
+    border: 2px solid var(--phase-color);
+    opacity: 0;
+  }
+  .orb-core {
+    position: relative; z-index: 1;
+    width: 108px; height: 108px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 28%,
+      color-mix(in srgb, var(--phase-color) 70%, white 30%),
+      var(--phase-color));
+    box-shadow: 0 0 46px 4px color-mix(in srgb, var(--phase-color) 45%, transparent);
+    transition: background 0.5s ease, box-shadow 0.5s ease;
+  }
+  .orbit { position: absolute; inset: 0; opacity: 0; }
+  .orbit span {
+    position: absolute; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--phase-color);
+  }
+  .orbit span:nth-child(1) { top: -2px; left: 50%; transform: translateX(-50%); }
+  .orbit span:nth-child(2) { top: 50%; right: -2px; transform: translateY(-50%); }
+  .orbit span:nth-child(3) { bottom: -2px; left: 50%; transform: translateX(-50%); opacity: 0.5; }
+
+  @keyframes breathe   { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+  @keyframes ripple    { 0% { transform: scale(0.85); opacity: 0.55; } 100% { transform: scale(1.55); opacity: 0; } }
+  @keyframes pulsefast { 0%,100% { transform: scale(1); } 50% { transform: scale(1.14); } }
+  @keyframes ripplefast{ 0% { transform: scale(0.9); opacity: 0.6; } 100% { transform: scale(1.35); opacity: 0; } }
+  @keyframes pop       { 0% { transform: scale(0.8); } 55% { transform: scale(1.22); } 100% { transform: scale(1); } }
+  @keyframes shake     { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-7px); } 75% { transform: translateX(7px); } }
+  @keyframes spin      { to { transform: rotate(360deg); } }
+  @keyframes barbounce { 0%,100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+
+  .orb-stage[data-phase="listening"] .orb-core { animation: breathe 3.4s ease-in-out infinite; }
+  .orb-stage[data-phase="listening"] .orb-ring { animation: ripple 3.4s ease-out infinite; }
+
+  .orb-stage[data-phase="awoken"] .orb-core { animation: pop 0.5s ease-out; }
+  .orb-stage[data-phase="awoken"] .orb-ring { animation: ripple 0.7s ease-out; }
+
+  .orb-stage[data-phase="recording"] .orb-core { animation: pulsefast 0.85s ease-in-out infinite; }
+  .orb-stage[data-phase="recording"] .orb-ring,
+  .orb-stage[data-phase="recording"] .orb-ring-2 { animation: ripplefast 0.85s ease-out infinite; }
+  .orb-stage[data-phase="recording"] .orb-ring-2 { animation-delay: 0.35s; }
+
+  .orb-stage[data-phase="transcribing"] .orbit,
+  .orb-stage[data-phase="sending"] .orbit { opacity: 1; animation: spin 1.1s linear infinite; }
+  .orb-stage[data-phase="transcribing"] .orb-core,
+  .orb-stage[data-phase="sending"] .orb-core { animation: breathe 1.6s ease-in-out infinite; }
+
+  .orb-stage[data-phase="replied"] .orb-core { animation: pop 0.5s ease-out; }
+  .orb-stage[data-phase="replied"] .orb-ring { animation: ripple 0.9s ease-out; }
+
+  .orb-stage[data-phase="rejected"] .orb-core,
+  .orb-stage[data-phase="error"] .orb-core { animation: shake 0.4s ease-in-out; }
+
+  .orb-stage[data-phase="offline"] .orb-core { opacity: 0.4; box-shadow: none; }
+
+  .waveform {
+    display: flex; gap: 5px; align-items: flex-end; height: 26px;
+    margin-top: 1.4em; opacity: 0; transition: opacity 0.25s ease;
+  }
+  .waveform.show { opacity: 1; }
+  .waveform span {
+    width: 5px; border-radius: 3px; background: var(--phase-color);
+    height: 100%; animation: barbounce 0.7s ease-in-out infinite;
+  }
+  .waveform span:nth-child(1) { animation-delay: 0s; }
+  .waveform span:nth-child(2) { animation-delay: 0.12s; }
+  .waveform span:nth-child(3) { animation-delay: 0.24s; }
+  .waveform span:nth-child(4) { animation-delay: 0.12s; }
+  .waveform span:nth-child(5) { animation-delay: 0s; }
+
+  .phase-label {
+    margin-top: 1.5em; font-size: 1.3em; font-weight: 700; letter-spacing: -0.01em;
+    color: var(--phase-color-text, var(--text-primary));
+  }
+  .phase-since { color: var(--text-muted); font-size: 0.8em; margin-top: 0.3em; font-variant-numeric: tabular-nums; }
+  .phase-detail {
+    margin-top: 1.1em; color: var(--text-secondary); font-size: 0.92em; text-align: center;
+    max-width: 26em; line-height: 1.5; min-height: 1.4em;
+  }
+</style>
+</head>
+<body>
+<div class="viz-root wrap">
+  <div class="header">
+    <h1>Voice status</h1>
+    <span class="live" id="live"><span class="pulse"></span><span id="live-label">live</span></span>
+  </div>
+  <p class="subtitle">what the wake-word listener is doing right now</p>
+
+  <div class="panel">
+    <div class="orb-wrap">
+      <div class="orb-stage" id="orb-stage" data-phase="offline">
+        <div class="orb-ring"></div>
+        <div class="orb-ring-2"></div>
+        <div class="orbit"><span></span><span></span><span></span></div>
+        <div class="orb-core"></div>
+      </div>
+      <div class="waveform" id="waveform">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <div class="phase-label" id="phase-label">–</div>
+      <div class="phase-since" id="phase-since"></div>
+      <div class="phase-detail" id="phase-detail"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PHASES = {
+  listening:    { label: 'Listening',          color: '--series-1', detail: () => 'Waiting for the wake word.' },
+  awoken:       { label: 'Wake word heard',     color: '--good',     detail: d => 'Score ' + (d.score != null ? d.score.toFixed(2) : '?') },
+  recording:    { label: 'Recording',           color: '--danger',   detail: () => 'Capturing your command…', waveform: true },
+  transcribing: { label: 'Transcribing',        color: '--series-2', detail: () => 'Sending audio to Groq Whisper…' },
+  sending:      { label: 'Thinking',            color: '--series-2', detail: d => d.transcript ? '“' + d.transcript + '”' : '' },
+  replied:      { label: 'Replied',             color: '--good',     detail: d => d.reply ? '“' + d.reply + '”' : '' },
+  rejected:     { label: 'Ignored',             color: '--warn',
+                  detail: d => d.reason === 'speaker mismatch'
+                    ? 'Heard someone, but the voice didn’t match — speaker score ' + (d.score != null ? d.score.toFixed(2) : '?')
+                    : (d.reason || 'Dropped.') },
+  error:        { label: 'Error',               color: '--danger',   detail: d => d.reason || 'Something went wrong.' },
+  offline:      { label: 'Offline',             color: '--text-muted', detail: () => 'The listener hasn’t checked in recently.' },
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+function fmtElapsed(s) {
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m < 60) return m + 'm ' + r + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
+let current = null; // last-rendered snapshot, so the per-second clock tick doesn't need another fetch
+
+function applyPhase(data) {
+  current = data;
+  const spec = PHASES[data.phase] || PHASES.offline;
+  const stage = document.getElementById('orb-stage');
+  const style = getComputedStyle(document.querySelector('.viz-root'));
+  const color = spec.color.startsWith('--') ? style.getPropertyValue(spec.color).trim() : spec.color;
+
+  stage.dataset.phase = data.phase;
+  stage.style.setProperty('--phase-color', color);
+  document.getElementById('phase-label').textContent = spec.label;
+  document.getElementById('phase-label').style.color = color;
+  document.getElementById('phase-detail').innerHTML = escapeHtml(spec.detail(data.detail || {}));
+  document.getElementById('waveform').classList.toggle('show', !!spec.waveform);
+
+  const live = document.getElementById('live');
+  live.classList.toggle('offline', !data.online);
+  document.getElementById('live-label').textContent = data.online ? 'live' : 'listener offline';
+}
+
+function tickClock() {
+  if (!current || !current.phase_since) return;
+  document.getElementById('phase-since').textContent = fmtElapsed(Date.now() / 1000 - current.phase_since);
+}
+
+async function poll() {
+  try {
+    const resp = await fetch('api/status');
+    applyPhase(await resp.json());
+  } catch (e) { /* transient — next poll retries */ }
+}
+poll();
+setInterval(poll, 1500);
+setInterval(tickClock, 1000);
+</script>
+</body>
+</html>
