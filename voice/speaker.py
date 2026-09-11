@@ -61,3 +61,33 @@ def is_enrolled_speaker(samples: np.ndarray, sample_rate: int = config.SAMPLE_RA
         raise RuntimeError(f"No enrollment found at {config.ENROLLMENT_PATH} — run `python -m voice.enroll` first.")
     score = similarity(embed(samples, sample_rate), reference)
     return score >= config.SPEAKER_THRESHOLD, score
+
+
+def add_enrollment_sample(samples: np.ndarray, sample_rate: int = config.SAMPLE_RATE) -> dict:
+    """Blends one more utterance into the existing enrollment by averaging
+    unit-normalized embedding *directions* and renormalizing, rather than
+    redoing full enrollment from scratch. This is the practical way to fold
+    in a sample from a different microphone: enroll.py's original 5 phrases
+    on the Pi mic weren't kept as raw audio (only the resulting embedding
+    was saved — see save_enrollment), so there's no way to hand a fresh
+    embed_speaker() call the old samples alongside new ones. Averaging two
+    already-computed unit vectors is a reasonable stand-in for that: the
+    result sits toward both, rather than snapping the whole voiceprint over
+    to whichever mic recorded most recently. See listen.py's
+    _on_enroll_clip for why this matters: cross-mic score drift is real
+    (enroll.py's own docstring already calls out re-enrolling after
+    changing microphones), not something a threshold tweak alone fixes
+    well."""
+    new_embedding = embed(samples, sample_rate)
+    new_unit = new_embedding / np.linalg.norm(new_embedding)
+    existing = enrolled()
+    if existing is not None:
+        existing_unit = existing / np.linalg.norm(existing)
+        combined = existing_unit + new_unit
+        combined = combined / np.linalg.norm(combined)
+        shift = similarity(existing_unit, combined)
+    else:
+        combined = new_unit
+        shift = 1.0
+    save_enrollment(combined)
+    return {"had_existing": existing is not None, "similarity_to_previous": round(shift, 3)}

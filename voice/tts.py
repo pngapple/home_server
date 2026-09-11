@@ -65,7 +65,12 @@ def synthesize(text: str) -> bytes | None:
             input=text.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=30,
+            # Normal synthesis is sub-second even for a multi-line reply
+            # (see listen.py's caller — it no longer blocks the reply text
+            # on this either way, but a stuck/slow piper under CPU
+            # contention from wake-word inference still shouldn't be able
+            # to make the eventual audio arrive absurdly late).
+            timeout=12,
         )
         if result.returncode != 0:
             log.warning("piper exited %d: %s", result.returncode, result.stderr.decode(errors="replace"))

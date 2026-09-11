@@ -89,7 +89,7 @@
 
   .ptt-divider { height: 1px; background: var(--border); margin: 1.8em 0 1.6em; }
   .ptt-row { display: flex; align-items: center; gap: 1em; }
-  #ptt-button {
+  #ptt-button, #enroll-button {
     display: flex; align-items: center; justify-content: center;
     width: 52px; height: 52px; flex: none; border-radius: 50%;
     background: var(--surface-2); border: 1px solid var(--border);
@@ -97,16 +97,31 @@
     user-select: none; -webkit-user-select: none; touch-action: none;
     transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
   }
-  #ptt-button:active,
-  #ptt-button.held {
+  #ptt-button:active, #ptt-button.held,
+  #enroll-button:active, #enroll-button.held {
     background: var(--danger); color: #fff; transform: scale(1.08);
     box-shadow: 0 0 0 8px color-mix(in srgb, var(--danger) 20%, transparent);
   }
-  #ptt-button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #ptt-button:disabled, #enroll-button:disabled { opacity: 0.4; cursor: not-allowed; }
   .ptt-text { min-width: 0; }
   #ptt-label { font-size: 0.85em; color: var(--text-secondary); }
   .mic-note { font-size: 0.78em; color: var(--text-muted); margin-top: 0.3em; }
   .mic-note.error { color: var(--danger); }
+  .mic-note.ok { color: var(--good); }
+
+  .link-button {
+    display: block; margin-top: 1.3em; padding: 0; border: none; background: none;
+    color: var(--text-muted); font-size: 0.8em; text-decoration: underline;
+    cursor: pointer; text-underline-offset: 2px;
+  }
+  .link-button:hover { color: var(--text-secondary); }
+  .enroll-panel { margin-top: 1em; }
+  .enroll-copy { font-size: 0.82em; color: var(--text-secondary); line-height: 1.5; margin: 0 0 0.9em; }
+  .enroll-passage {
+    font-size: 0.88em; font-style: italic; color: var(--text-primary);
+    line-height: 1.6; margin: 0 0 1.2em; padding-left: 0.9em;
+    border-left: 2px solid var(--series-2);
+  }
 
   .panel {
     background: var(--surface-1);
@@ -328,6 +343,19 @@
       <div class="ptt-text">
         <div id="ptt-label">Hold to talk from this device</div>
         <div class="mic-note" id="mic-note" hidden></div>
+      </div>
+    </div>
+
+    <button id="enroll-toggle" type="button" class="link-button">Improve voice match on this device</button>
+    <div class="enroll-panel" id="enroll-panel" hidden>
+      <p class="enroll-copy">A different mic hears your voice a bit differently — reading this in once helps this device's mic specifically. Hold the button, read it out loud, then release:</p>
+      <blockquote class="enroll-passage">“Hey, it's me — this is my voice, and I'd like this device to recognize it better. The quick brown fox jumps over the lazy dog. This is the voice that should be allowed to control things.”</blockquote>
+      <div class="ptt-row">
+        <button id="enroll-button" type="button" aria-label="Hold to record a voice sample">🎓</button>
+        <div class="ptt-text">
+          <div id="enroll-label">Hold and read the passage above</div>
+          <div class="mic-note" id="enroll-note" hidden></div>
+        </div>
       </div>
     </div>
   </div>
@@ -694,6 +722,105 @@ pttButton.addEventListener('mouseleave', stopTalking); // dragged off while held
 pttButton.addEventListener('touchstart', (e) => { e.preventDefault(); startTalking(); }, { passive: false });
 pttButton.addEventListener('touchend', (e) => { e.preventDefault(); stopTalking(); }, { passive: false });
 pttButton.addEventListener('touchcancel', (e) => { e.preventDefault(); stopTalking(); }, { passive: false });
+
+// --- Voice enrollment from this device: same capture approach as
+// push-to-talk, but a different WS path (voice/browser_mic.py routes on
+// "enroll" appearing in the path — see nginx's /voice/enroll-ws) and a
+// different protocol on top of it: the connection stays open past the end
+// of recording so the result (added / too short / error) can come back
+// over it, so release sends a text "stop" message instead of just closing
+// — see browser_mic.py's _collect(stop_on_text=...).
+document.getElementById('enroll-toggle').addEventListener('click', () => {
+  const panel = document.getElementById('enroll-panel');
+  panel.hidden = !panel.hidden;
+});
+
+let enrollStream = null, enrollAudioCtx = null, enrollWs = null, enrollHeld = false;
+
+function enrollNote(text, kind) {
+  const el = document.getElementById('enroll-note');
+  el.textContent = text;
+  el.classList.remove('error', 'ok');
+  if (kind) el.classList.add(kind);
+  el.hidden = !text;
+}
+
+async function startEnrolling() {
+  if (enrollHeld) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    enrollNote('This page needs HTTPS (or localhost) for microphone access.', 'error');
+    return;
+  }
+  enrollHeld = true;
+  document.getElementById('enroll-button').classList.add('held');
+  enrollNote('Listening…');
+
+  try {
+    enrollStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (e) {
+    enrollNote('Microphone access denied or unavailable (' + e.message + ').', 'error');
+    stopEnrolling();
+    return;
+  }
+  if (!enrollHeld) { enrollStream.getTracks().forEach(t => t.stop()); return; } // released during the permission prompt
+
+  const wsUrl = new URL('enroll-ws', document.baseURI);
+  wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  enrollWs = new WebSocket(wsUrl);
+  enrollWs.binaryType = 'arraybuffer';
+  enrollWs.addEventListener('message', (e) => {
+    try {
+      const result = JSON.parse(e.data);
+      enrollNote(result.message, result.ok ? 'ok' : 'error');
+    } catch (err) {
+      enrollNote('Got an unreadable response from the listener.', 'error');
+    }
+  });
+  enrollWs.addEventListener('error', () => enrollNote('Could not reach the voice listener.', 'error'));
+
+  enrollAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const source = enrollAudioCtx.createMediaStreamSource(enrollStream);
+  const processor = enrollAudioCtx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (e) => {
+    if (!enrollWs || enrollWs.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const pcm16 = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    enrollWs.send(pcm16.buffer);
+  };
+  const muteGain = enrollAudioCtx.createGain();
+  muteGain.gain.value = 0;
+  source.connect(processor);
+  processor.connect(muteGain);
+  muteGain.connect(enrollAudioCtx.destination);
+}
+
+function stopEnrolling() {
+  if (!enrollHeld) return;
+  enrollHeld = false;
+  document.getElementById('enroll-button').classList.remove('held');
+  if (enrollWs && enrollWs.readyState === WebSocket.OPEN) {
+    enrollWs.send('stop'); // signals "done recording" — see browser_mic.py; the connection stays open for the reply
+  } else if (enrollWs) {
+    try { enrollWs.close(); } catch (e) {}
+  }
+  if (enrollAudioCtx) { try { enrollAudioCtx.close(); } catch (e) {} enrollAudioCtx = null; }
+  if (enrollStream) { enrollStream.getTracks().forEach(t => t.stop()); enrollStream = null; }
+  enrollNote('Processing…');
+}
+
+const enrollButton = document.getElementById('enroll-button');
+enrollButton.addEventListener('mousedown', startEnrolling);
+enrollButton.addEventListener('mouseup', stopEnrolling);
+enrollButton.addEventListener('mouseleave', stopEnrolling);
+enrollButton.addEventListener('touchstart', (e) => { e.preventDefault(); startEnrolling(); }, { passive: false });
+enrollButton.addEventListener('touchend', (e) => { e.preventDefault(); stopEnrolling(); }, { passive: false });
+enrollButton.addEventListener('touchcancel', (e) => { e.preventDefault(); stopEnrolling(); }, { passive: false });
 </script>
 </body>
 </html>

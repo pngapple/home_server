@@ -159,9 +159,19 @@ def _handle_command_audio(source: str, command_audio: np.ndarray) -> None:
     reply = _send_command(result)
     if reply is not None:
         log.info("[%s] Reply: %s", source, reply)
-        # Spoken through the /voice/ dashboard in the browser, not this
-        # device's own speaker — see tts.synthesize's docstring.
-        _report_status(source, "replied", {"transcript": result.text, "reply": reply[:400]}, audio=tts.synthesize(reply))
+        reply_detail = {"transcript": result.text, "reply": reply[:400]}
+        # Text first, unconditionally — piper synthesis (tts.synthesize)
+        # can occasionally take several seconds under CPU contention from
+        # wake-word inference, and blocking the reply itself on that isn't
+        # worth it just to attach audio at the same time. The dashboard
+        # sees the reply immediately; a second update with the same phase
+        # follows once/if audio is ready, picked up via the bumped
+        # audio_id rather than a second "replied" (bot/voice_status_server
+        # only counts the first as a real history entry, matching this).
+        _report_status(source, "replied", reply_detail)
+        audio = tts.synthesize(reply)
+        if audio:
+            _report_status(source, "replied", reply_detail, audio=audio)
     else:
         _report_status(source, "error", {"reason": "webhook unreachable", "transcript": result.text})
 
@@ -225,9 +235,39 @@ def _on_ptt_clip(remote: str, command_audio: np.ndarray) -> None:
     _handle_command_audio(source, command_audio)
 
 
+# Below this, too little audio to trust an embedding from at all — a
+# half-second blip isn't "a bad sample," it's almost certainly a dropped
+# connection or a release before any real speech started.
+_MIN_ENROLL_SAMPLE_S = 2.5
+
+
+def _on_enroll_clip(remote: str, samples: np.ndarray) -> dict:
+    """Called synchronously (from browser_mic.py's asyncio.to_thread, with
+    the WebSocket still open waiting on the result) once someone's read a
+    passage into the dashboard's "improve voice match" flow. Folds the
+    sample into the existing enrollment via speaker.add_enrollment_sample —
+    see that function's docstring for why this is an average, not a
+    replacement."""
+    duration_s = len(samples) / config.SAMPLE_RATE
+    if duration_s < _MIN_ENROLL_SAMPLE_S:
+        return {"ok": False, "message": f"Only {duration_s:.1f}s captured — hold the button longer and read the whole passage."}
+    result = speaker.add_enrollment_sample(samples)
+    log.info(
+        "[enroll:%s] Added a %.1fs sample (voiceprint shifted to %.3f similarity with the previous one)",
+        remote,
+        duration_s,
+        result["similarity_to_previous"],
+    )
+    return {
+        "ok": True,
+        "message": f"Added a {duration_s:.1f}s sample from this device's mic to your voiceprint.",
+    }
+
+
 def run() -> None:
     log.info("Loading wake-word model from %s", config.WAKE_WORD_MODEL_PATH)
     browser_mic.on_clip(_on_ptt_clip)
+    browser_mic.on_enroll_clip(_on_enroll_clip)
     browser_mic.start_background()
     Listener("pi_mic", pi_frame_stream()).run()
 

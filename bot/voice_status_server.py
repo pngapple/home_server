@@ -118,14 +118,19 @@ async def handle_post_status(request: web.Request) -> web.Response:
         return web.Response(status=400, text="Bad request: 'phase' is required.")
 
     now = time.time()
-    if phase != _state["phase"]:
+    is_new_phase = phase != _state["phase"]
+    if is_new_phase:
         _state["phase_since"] = now
     _state["phase"] = phase
     detail = body.get("detail") or {}
     _state["detail"] = detail
     _state["updated_at"] = now
 
-    if phase in _HISTORY_PHASES:
+    # Only on the actual transition into this phase — a "replied" update
+    # can arrive twice in a row (text first, then again once TTS synthesis
+    # catches up with audio — see listen.py's _handle_command_audio) and
+    # the second one must not add a second entry for the same turn.
+    if is_new_phase and phase in _HISTORY_PHASES:
         _history.append({"ts": now, "phase": phase, "detail": detail})
 
     audio_b64 = body.get("audio_b64")
