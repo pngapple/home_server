@@ -23,16 +23,15 @@ import time
 from datetime import timedelta
 
 import discord
-import requests
 
-from . import config, permissions
+from . import completions, config, permissions
 from .store import user_store
 
 log = logging.getLogger("discord-llm-bot.moderation")
 
 _STRIKES = user_store(config.MODERATION_STRIKES_FILE, list)
 
-_session = requests.Session()
+_TITLE = "home-server-discord-bot-moderation"
 
 _CLASSIFIER_PROMPT = (
     "You are a content moderation classifier for a small private Discord "
@@ -55,11 +54,27 @@ _TIER_TIMEOUT_MINUTES = {
 }
 
 
+def _endpoints() -> tuple[completions.Endpoint, completions.Endpoint | None]:
+    """Classification is the cheapest path to move onto local hardware: it runs
+    on every ordinary message, needs no tool calling, and is where keeping
+    household chat off a third party actually matters. Because it is also the
+    safety net, a sleeping box must not silently switch moderation off — so
+    when the local endpoint doesn't answer, this falls back to OpenRouter and
+    keeps classifying rather than failing open."""
+    primary = completions.Endpoint(
+        config.MODERATION_API_BASE, config.MODERATION_API_KEY, config.MODERATION_MODEL, _TITLE
+    )
+    if primary.is_openrouter:
+        return primary, None
+    return primary, completions.openrouter_endpoint(config.OPENROUTER_MODEL, _TITLE)
+
+
 def _classify(text: str) -> tuple[bool, str, str]:
     """Returns (flagged, category, reason). Fails open (not flagged) on any
-    error — a moderation outage should never block ordinary chat."""
+    error — a moderation outage should never block ordinary chat. That is the
+    last resort now rather than the first: see _endpoints()."""
     payload = {
-        "model": config.MODERATION_MODEL,
+        # No "model" — completions.post() fills it from whichever endpoint serves.
         "messages": [
             {"role": "system", "content": _CLASSIFIER_PROMPT},
             {"role": "user", "content": text},
@@ -67,14 +82,11 @@ def _classify(text: str) -> tuple[bool, str, str]:
         "max_tokens": 150,
         "response_format": {"type": "json_object"},
     }
-    headers = {
-        "Authorization": f"Bearer {config.MODERATION_API_KEY}",
-        "Content-Type": "application/json",
-        "X-Title": "home-server-discord-bot-moderation",
-    }
+    primary, fallback = _endpoints()
     try:
-        resp = _session.post(f"{config.MODERATION_API_BASE}/chat/completions", headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
+        # attempts=1: this runs before every ordinary reply, so a retry loop
+        # here would put its backoff on the critical path of each message.
+        resp, _served = completions.post(payload, primary, timeout=15, fallback=fallback)
         content = resp.json()["choices"][0]["message"]["content"]
         data = json.loads(content)
         return bool(data.get("flagged")), str(data.get("category") or "none"), str(data.get("reason") or "")

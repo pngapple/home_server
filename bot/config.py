@@ -50,6 +50,12 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY") or OPENROUTER_API_KEY
 # tool calling for the reminder/tool features to work.
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
 
+# The slug to ask LLM_API_BASE for, which is only distinct from the line above
+# when that points somewhere other than OpenRouter — a local server's
+# "qwen2.5:7b" is not something OpenRouter would accept, so the two names have
+# to exist separately for the fallback to have a valid model to ask for.
+LLM_MODEL = os.environ.get("LLM_MODEL") or OPENROUTER_MODEL
+
 # When set, only routes requests to providers with a Zero Data Retention
 # policy (https://openrouter.ai/docs/guides/features/zdr).
 OPENROUTER_ZDR = os.environ.get("OPENROUTER_ZDR", "").lower() in ("1", "true", "yes")

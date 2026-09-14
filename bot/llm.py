@@ -14,11 +14,13 @@ from datetime import datetime, timedelta
 
 import requests
 
-from . import config, episodes, lessons, metrics
+from . import completions, config, episodes, lessons, metrics
 from .discord_client import display_name
 from .tools import ToolContext, dispatch_result, get_tool_schemas
 
 log = logging.getLogger("discord-llm-bot.llm")
+
+_TITLE = "home-server-discord-bot"
 
 # Safety cap on tool-call round trips per user message, in case the model
 # gets stuck calling tools instead of answering.
@@ -27,8 +29,8 @@ MAX_TOOL_ITERATIONS = 5
 # Retry once on the transient failures OpenRouter actually produces (an
 # upstream 5xx, a rate-limited 429, a dropped connection) before giving the
 # user an error — those are common enough that one retry turns most of them
-# into a normal reply.
-_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# into a normal reply. Which statuses count as transient lives in
+# completions.py, since the fallback decision uses the same set.
 _RETRY_ATTEMPTS = 2
 _RETRY_BACKOFF_S = 1.5
 
@@ -105,7 +107,8 @@ def call_openrouter(
     sent the message that triggered this — see llm_status_server.py's
     per-user table."""
     payload: dict = {
-        "model": config.OPENROUTER_MODEL,
+        # No "model" here on purpose — the slug belongs to whichever endpoint
+        # ends up serving this, and completions.post() fills it in.
         "messages": messages,
         # OpenRouter omits per-call cost from `usage` unless asked — this is
         # the only way to get a per-user credit-usage figure, since the
@@ -136,15 +139,23 @@ def call_openrouter(
     if provider:
         payload["provider"] = provider
 
+    primary, fallback = _endpoints()
     start = time.monotonic()
-    resp = _post_with_retry(payload, timeout)
+    resp, served = completions.post(
+        payload,
+        primary,
+        timeout=timeout,
+        attempts=_RETRY_ATTEMPTS,
+        backoff_s=_RETRY_BACKOFF_S,
+        fallback=fallback,
+    )
     duration_s = time.monotonic() - start
 
     data = resp.json()
     usage = data.get("usage") or {}
-    model = data.get("model", config.OPENROUTER_MODEL)
+    model = data.get("model", served.model)
     metrics.record(
-        source="openrouter",
+        source=served.metrics_source,
         model=model,
         input_tokens=usage.get("prompt_tokens", 0),
         output_tokens=usage.get("completion_tokens", 0),
@@ -157,28 +168,18 @@ def call_openrouter(
     return data["choices"][0]["message"]
 
 
-def _post_with_retry(payload: dict, timeout: int) -> requests.Response:
-    headers = {
-        "Authorization": f"Bearer {config.LLM_API_KEY}",
-        "Content-Type": "application/json",
-        # Optional but recommended by OpenRouter for attribution/rate-limit purposes:
-        "X-Title": "home-server-discord-bot",
-    }
-    for attempt in range(1, _RETRY_ATTEMPTS + 1):
-        last = attempt == _RETRY_ATTEMPTS
-        try:
-            resp = _session.post(f"{config.LLM_API_BASE}/chat/completions", headers=headers, json=payload, timeout=timeout)
-        except requests.RequestException:
-            if last:
-                raise
-            log.warning("OpenRouter request failed (attempt %d), retrying", attempt, exc_info=True)
-        else:
-            if last or resp.status_code not in _RETRY_STATUSES:
-                resp.raise_for_status()
-                return resp
-            log.warning("OpenRouter returned HTTP %s (attempt %d), retrying", resp.status_code, attempt)
-        time.sleep(_RETRY_BACKOFF_S * attempt)
-    raise AssertionError("unreachable")  # the final attempt always returns or raises
+def _endpoints() -> tuple[completions.Endpoint, completions.Endpoint | None]:
+    """Where this turn should go, and where to retry it if that doesn't answer.
+
+    There is nothing to fall back to when the configured endpoint already *is*
+    OpenRouter, which is the default — so an unmodified install makes exactly
+    one request per turn, same as before any of this existed."""
+    primary = completions.Endpoint(
+        config.LLM_API_BASE, config.LLM_API_KEY, config.LLM_MODEL, _TITLE
+    )
+    if primary.is_openrouter:
+        return primary, None
+    return primary, completions.openrouter_endpoint(config.OPENROUTER_MODEL, _TITLE)
 
 
 def _system_prompt(user_id: int | None = None, tool_names: frozenset[str] = frozenset()) -> str:

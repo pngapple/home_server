@@ -10,12 +10,38 @@
 - Bot logs: `sudo journalctl -u discord-llm-bot.service`.
 - Deploys via `!deploy` restart `sudo systemctl restart discord-llm-bot`.
 - Chat and moderation each read their own endpoint (`LLM_API_BASE` /
-  `MODERATION_API_BASE`, with matching `_API_KEY`s), so either can be pointed at
-  an OpenAI-compatible server on the tailnet without touching the other. Read
-  them from `config`, never hardcode the host — `tests/test_api_endpoints.py`
-  fails the build if either module names `openrouter.ai` again. The one
-  deliberate exception is `llm_status_server.py`'s `/auth/key` call, which reads
-  your OpenRouter *account balance* and is unrelated to where completions go.
+  `MODERATION_API_BASE`, with matching `_API_KEY` and `_MODEL`), so either can
+  be pointed at an OpenAI-compatible server on the tailnet without touching the
+  other. `bot/completions.py` is the only module allowed to name the host —
+  `tests/test_api_endpoints.py` fails the build if a call site hardcodes it
+  again. The one deliberate exception is `llm_status_server.py`'s `/auth/key`
+  call, which reads your OpenRouter *account balance* and has nothing to do with
+  where completions go.
+
+## Falling back off local hardware
+
+`bot/completions.py` exists because a box under a desk sleeps on idle. When a
+configured endpoint isn't OpenRouter and doesn't answer, the call is retried
+against OpenRouter instead of failing. Three things about it are load-bearing:
+
+- **The model travels with the endpoint, not the payload.** A local
+  `qwen2.5:7b` is not a slug OpenRouter accepts, so falling back swaps the model
+  as well as the host. Never put `"model"` in a payload dict.
+- **Only "not there" falls back.** A refused connection, a timeout or a 5xx
+  means the endpoint is down; a 400 means the request is malformed and would
+  fail identically upstream, so it raises rather than spending money to
+  rediscover that.
+- **A local call is recorded as `source="local"`**, not `"openrouter"`
+  (`Endpoint.metrics_source`). It cost nothing, and filing it as OpenRouter
+  would inflate the spend figures on `/llm/`.
+
+Moderation gets the fallback for a specific reason: it is the safety net, and
+it fails open on error by design. Pointed at a sleeping PC without a fallback,
+it would switch itself off silently. It also uses `attempts=1` — it runs before
+every ordinary reply, so retry backoff there sits on the critical path of every
+message. Nothing but the chat path should ever trigger a wake-on-LAN, for the
+same reason: a classifier that runs on every message would never let the box
+sleep.
 
 ## Architecture
 
