@@ -35,6 +35,17 @@ def _optional_int(name: str) -> int | None:
 DISCORD_BOT_TOKEN = _required("DISCORD_BOT_TOKEN")
 OPENROUTER_API_KEY = _required("OPENROUTER_API_KEY")
 
+# Where chat completions are sent. Anything speaking the OpenAI-compatible
+# /chat/completions shape works, so this can point at a llama.cpp or Ollama
+# server on the tailnet instead of a paid API. Note that the model catalog
+# lookup in llm._context_window() reads this too, and a local server usually
+# reports no context_length — that path already degrades to None, which just
+# means history gets trimmed by the fallback rather than the real window.
+LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://openrouter.ai/api/v1").rstrip("/")
+# Separate from OPENROUTER_API_KEY so pointing the line above at a local server
+# doesn't hand your paid-API key to it.
+LLM_API_KEY = os.environ.get("LLM_API_KEY") or OPENROUTER_API_KEY
+
 # Any model slug from https://openrouter.ai/models works here. Must support
 # tool calling for the reminder/tool features to work.
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
@@ -202,6 +213,15 @@ MODERATION_ENABLED = _flag("MODERATION_ENABLED", default=True)
 # Reuses OPENROUTER_MODEL by default; override to route classification to a
 # separate (e.g. cheaper/faster) model without affecting normal chat.
 MODERATION_MODEL = os.environ.get("MODERATION_MODEL") or OPENROUTER_MODEL
+# Classification is the cheapest path to move onto your own hardware: it runs
+# on every ordinary message, needs no tool calling (which is what small local
+# models are worst at), and keeping household chat off a third party is a real
+# privacy gain. Defaults to wherever normal chat goes.
+MODERATION_API_BASE = os.environ.get("MODERATION_API_BASE", LLM_API_BASE).rstrip("/")
+# Separate from OPENROUTER_API_KEY so pointing the line above at a local server
+# doesn't hand your paid-API key to it. Local servers generally ignore the
+# value, but sending it is still wrong.
+MODERATION_API_KEY = os.environ.get("MODERATION_API_KEY") or OPENROUTER_API_KEY
 MODERATION_STRIKES_FILE = os.environ.get("MODERATION_STRIKES_FILE", "moderation.json")
 MODERATION_STRIKE_WINDOW_DAYS = int(os.environ.get("MODERATION_STRIKE_WINDOW_DAYS", "7"))
 # 1st flagged message in the window: refused, no timeout. 2nd: timed out for

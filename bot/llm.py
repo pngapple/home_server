@@ -20,8 +20,6 @@ from .tools import ToolContext, dispatch_result, get_tool_schemas
 
 log = logging.getLogger("discord-llm-bot.llm")
 
-_API_BASE = "https://openrouter.ai/api/v1"
-
 # Safety cap on tool-call round trips per user message, in case the model
 # gets stuck calling tools instead of answering.
 MAX_TOOL_ITERATIONS = 5
@@ -81,7 +79,7 @@ def _context_window(model: str) -> int | None:
     if _catalog_fetched_at is None or (not _context_windows and now - _catalog_fetched_at > _CATALOG_RETRY_S):
         _catalog_fetched_at = now
         try:
-            resp = _session.get(f"{_API_BASE}/models", timeout=10)
+            resp = _session.get(f"{config.LLM_API_BASE}/models", timeout=10)
             resp.raise_for_status()
             for entry in resp.json().get("data", []):
                 length = entry.get("context_length")
@@ -161,7 +159,7 @@ def call_openrouter(
 
 def _post_with_retry(payload: dict, timeout: int) -> requests.Response:
     headers = {
-        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {config.LLM_API_KEY}",
         "Content-Type": "application/json",
         # Optional but recommended by OpenRouter for attribution/rate-limit purposes:
         "X-Title": "home-server-discord-bot",
@@ -169,7 +167,7 @@ def _post_with_retry(payload: dict, timeout: int) -> requests.Response:
     for attempt in range(1, _RETRY_ATTEMPTS + 1):
         last = attempt == _RETRY_ATTEMPTS
         try:
-            resp = _session.post(f"{_API_BASE}/chat/completions", headers=headers, json=payload, timeout=timeout)
+            resp = _session.post(f"{config.LLM_API_BASE}/chat/completions", headers=headers, json=payload, timeout=timeout)
         except requests.RequestException:
             if last:
                 raise

@@ -9,6 +9,13 @@
   find the current model.
 - Bot logs: `sudo journalctl -u discord-llm-bot.service`.
 - Deploys via `!deploy` restart `sudo systemctl restart discord-llm-bot`.
+- Chat and moderation each read their own endpoint (`LLM_API_BASE` /
+  `MODERATION_API_BASE`, with matching `_API_KEY`s), so either can be pointed at
+  an OpenAI-compatible server on the tailnet without touching the other. Read
+  them from `config`, never hardcode the host — `tests/test_api_endpoints.py`
+  fails the build if either module names `openrouter.ai` again. The one
+  deliberate exception is `llm_status_server.py`'s `/auth/key` call, which reads
+  your OpenRouter *account balance* and is unrelated to where completions go.
 
 ## Architecture
 

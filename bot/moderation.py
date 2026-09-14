@@ -32,7 +32,6 @@ log = logging.getLogger("discord-llm-bot.moderation")
 
 _STRIKES = user_store(config.MODERATION_STRIKES_FILE, list)
 
-_API_BASE = "https://openrouter.ai/api/v1"
 _session = requests.Session()
 
 _CLASSIFIER_PROMPT = (
@@ -69,12 +68,12 @@ def _classify(text: str) -> tuple[bool, str, str]:
         "response_format": {"type": "json_object"},
     }
     headers = {
-        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {config.MODERATION_API_KEY}",
         "Content-Type": "application/json",
         "X-Title": "home-server-discord-bot-moderation",
     }
     try:
-        resp = _session.post(f"{_API_BASE}/chat/completions", headers=headers, json=payload, timeout=15)
+        resp = _session.post(f"{config.MODERATION_API_BASE}/chat/completions", headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
         data = json.loads(content)
