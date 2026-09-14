@@ -18,7 +18,7 @@ def _required(name: str) -> str:
     do, rather than a bare KeyError traceback out of systemd."""
     value = os.environ.get(name)
     if not value:
-        raise RuntimeError(f"{name} is not set — add it to .env (see SETUP_GUIDE.md) and restart the service.")
+        raise RuntimeError(f"{name} is not set — add it to .env (see .env.example) and restart the service.")
     return value
 
 

@@ -35,6 +35,28 @@ else
 fi
 
 echo
+echo "== Tailnet resolver (the llm/cigboard/status/voice shortcuts) =="
+# "systemctl is-active dnsmasq" is not enough: dnsmasq can be up and bound to
+# nothing on the tailnet, which is silent from systemd's side but breaks every
+# device that accepts Tailscale DNS -- including their plain internet lookups,
+# since this resolver is what forwards those too.
+if ! command -v dig >/dev/null 2>&1; then
+  echo "SKIP  dig not installed, cannot probe the resolver"
+elif [ -z "${tailscale_ip:-}" ]; then
+  echo "SKIP  no tailscale ip to probe"
+else
+  for name in llm openrouter.ai; do
+    if [ -n "$(dig +short +time=3 +tries=1 "@$tailscale_ip" "$name" A 2>/dev/null)" ]; then
+      echo "OK    $tailscale_ip resolves $name"
+      ok=$((ok + 1))
+    else
+      echo "FAIL  $tailscale_ip does not answer for $name (dnsmasq bound to the wrong interface?)"
+      fail=$((fail + 1))
+    fi
+  done
+fi
+
+echo
 echo "== DNS resolution (what the bot needs to reach Discord/OpenRouter) =="
 for host in discord.com openrouter.ai; do
   if getent hosts "$host" >/dev/null 2>&1; then

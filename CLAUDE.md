@@ -146,6 +146,42 @@ Every reply is DMed to the owner via `notify.send_dm()` regardless of
 whether local TTS (`voice/tts.py`, piper) is configured or succeeds — that
 DM is the durable record, TTS is best-effort.
 
+## Host setup
+
+`sudo scripts/install_services.sh` is the whole host-side install: systemd
+units, the journald drop-in, and the tailnet resolver. It's idempotent —
+re-run it after editing anything it installs. `.env.example` is the
+authoritative inventory of settings; `bot/config.py` and `voice/config.py`
+hold the defaults for everything absent from it.
+
+The bare-name shortcuts (`http://llm`, `http://cigboard`, ...) come from
+`scripts/dnsmasq/status.conf`. Edit it **there**, not in `/etc/dnsmasq.d/` —
+it lived only on the host for months, hand-edited, and that is precisely how
+it drifted into taking DNS down. Two traps, both now guarded by
+`tests/test_dnsmasq_config.py`:
+
+- It must say `bind-dynamic`, never `bind-interfaces`. tailscaled's unit goes
+  active the moment the daemon starts, long before it has put an IPv4 address
+  on `tailscale0`; `bind-interfaces` snapshots addresses once at startup, so
+  dnsmasq binds nothing on the tailnet and — because that isn't an *error* —
+  stays `active (running)` with `Restart=on-failure` never firing. Every
+  device accepting Tailscale DNS then loses not just the shortcuts but all
+  ordinary internet lookups, since this resolver forwards those too.
+- Never leave a file in `/etc/dnsmasq.d/` that isn't `*.conf`. The unit's
+  ExecStart passes `-7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new`, so a
+  `status.conf.bak-*` sitting next to the real file is *loaded as config*, not
+  ignored. The installer now sweeps strays into `/etc/dnsmasq.d.backups/`.
+
+The records are templated on `__TAILSCALE_IP__` and rendered at install time
+from `tailscale ip -4`, because that address differs on every machine.
+
+`scripts/check_startup.sh` probes the resolver rather than trusting
+`systemctl is-active`, which reported healthy throughout the outage above.
+
+`scripts/setup_tailscale_serve.sh` publishes the dashboards over Tailscale
+Serve, replacing the hand-rolled nginx vhost and its cert-renew timer. Serve
+does paths only (`/llm/`); it can't do bare names, since no cert covers them.
+
 ## Dashboards
 
 `bot/static/llm.html` and `cigboard/static/cigboard.html`, loaded via

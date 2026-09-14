@@ -21,7 +21,8 @@ log = logging.getLogger("discord-llm-bot.discord_client")
 intents = discord.Intents.default()
 intents.message_content = True  # required to read message text; enable this
                                 # "Privileged Gateway Intent" in the Discord
-                                # Developer Portal too (see SETUP_GUIDE.md)
+                                # Developer Portal too — it is per-application,
+                                # so it carries across a host move
 
 
 class Bot(discord.Client):
