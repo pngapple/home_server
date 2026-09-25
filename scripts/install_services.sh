@@ -75,6 +75,15 @@ python3 "$REPO_DIR/scripts/pihole/apply_settings.py" "$PIHOLE_SETTINGS" |
     pihole-FTL --config "$key" "$value" >/dev/null
   done
 
+echo "== Enabling Tailscale exit node =="
+# Advertising only offers it. No device routes through here until someone
+# switches "Use exit node" on in their Tailscale app, and the first advertise
+# also needs a one-time approval in the admin console (Machines -> this host
+# -> Edit route settings -> Use as exit node).
+install -m 644 "$REPO_DIR/scripts/sysctl/99-tailscale-exit-node.conf" /etc/sysctl.d/99-tailscale-exit-node.conf
+sysctl -q -p /etc/sysctl.d/99-tailscale-exit-node.conf
+tailscale set --advertise-exit-node
+
 echo "== Installing persistent journal config =="
 mkdir -p /etc/systemd/journald.conf.d
 install -m 644 "$REPO_DIR/scripts/systemd/journald-persistent.conf" /etc/systemd/journald.conf.d/persistent.conf

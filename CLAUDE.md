@@ -216,6 +216,12 @@ from `tailscale ip -4`, because that address differs on every machine.
 The nginx vhost that answers on those names (`/etc/nginx/sites-available/status`)
 is still host-only, not in this repo.
 
+The Pi is also a Tailscale exit node (`scripts/sysctl/99-tailscale-exit-node.conf`
+plus `tailscale set --advertise-exit-node` in the installer). Advertising
+routes nobody's traffic; each device opts in with "Use exit node" in its own
+Tailscale app. The first advertise on a new host needs a one-time approval in
+the admin console.
+
 `scripts/check_startup.sh` probes the resolver rather than trusting
 `systemctl is-active`, which reported healthy throughout the outage above.
 
