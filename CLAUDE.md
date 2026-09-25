@@ -187,26 +187,34 @@ re-run it after editing anything it installs. `.env.example` is the
 authoritative inventory of settings; `bot/config.py` and `voice/config.py`
 hold the defaults for everything absent from it.
 
-The bare-name shortcuts (`http://llm`, `http://cigboard`, ...) come from
-`scripts/dnsmasq/status.conf`. Edit it **there**, not in `/etc/dnsmasq.d/` —
-it lived only on the host for months, hand-edited, and that is precisely how
-it drifted into taking DNS down. Two traps, both now guarded by
-`tests/test_dnsmasq_config.py`:
+The tailnet resolver is Pi-hole (ad blocking plus the bare-name shortcuts
+`http://llm`, `http://cigboard`, ..., `http://pihole` for its own UI). The
+settings this repo owns are in `scripts/pihole/pihole.toml`; the installer
+re-applies every key with `pihole-FTL --config` on each run, so edit them
+**there**, not in `/etc/pihole/` or the web UI's settings pages. Blocklists,
+allowlists and the admin password are the exception — those live in the web
+UI. It replaced a plain dnsmasq that lived only on the host for months,
+hand-edited, and that is precisely how it drifted into taking DNS down. The
+traps carried over, guarded by `tests/test_pihole_config.py`:
 
-- It must say `bind-dynamic`, never `bind-interfaces`. tailscaled's unit goes
-  active the moment the daemon starts, long before it has put an IPv4 address
-  on `tailscale0`; `bind-interfaces` snapshots addresses once at startup, so
-  dnsmasq binds nothing on the tailnet and — because that isn't an *error* —
-  stays `active (running)` with `Restart=on-failure` never firing. Every
-  device accepting Tailscale DNS then loses not just the shortcuts but all
-  ordinary internet lookups, since this resolver forwards those too.
-- Never leave a file in `/etc/dnsmasq.d/` that isn't `*.conf`. The unit's
-  ExecStart passes `-7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new`, so a
-  `status.conf.bak-*` sitting next to the real file is *loaded as config*, not
-  ignored. The installer now sweeps strays into `/etc/dnsmasq.d.backups/`.
+- `dns.listeningMode` must be `SINGLE`, never `BIND`. `BIND` emits dnsmasq's
+  `bind-interfaces`, and tailscaled's unit goes active the moment the daemon
+  starts, long before it has put an IPv4 address on `tailscale0`;
+  `bind-interfaces` snapshots addresses once at startup, so the resolver binds
+  nothing on the tailnet and — because that isn't an *error* — stays
+  `active (running)`. Every device accepting Tailscale DNS then loses not just
+  the shortcuts but all ordinary internet lookups, since this resolver
+  forwards those too.
+- The dnsmasq package's own `dnsmasq.service` stays **masked**. FTL is a
+  dnsmasq fork and needs the same port 53.
+- The web UI binds `127.0.0.1:8797`; nginx publishes it on the `pihole` name.
+  FTL's default grabs 80/443 on every address, which nginx already holds.
 
 The records are templated on `__TAILSCALE_IP__` and rendered at install time
 from `tailscale ip -4`, because that address differs on every machine.
+
+The nginx vhost that answers on those names (`/etc/nginx/sites-available/status`)
+is still host-only, not in this repo.
 
 `scripts/check_startup.sh` probes the resolver rather than trusting
 `systemctl is-active`, which reported healthy throughout the outage above.

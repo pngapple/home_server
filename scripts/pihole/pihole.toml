@@ -1,0 +1,58 @@
+# The settings this repo owns in /etc/pihole/pihole.toml. scripts/install_services.sh
+# substitutes __TAILSCALE_IP__ for this machine's `tailscale ip -4`, seeds a fresh
+# install with the result, and re-applies every key on each run via
+# `pihole-FTL --config`. Anything not listed here (blocklists, allowlists, the
+# admin password) is managed from the web UI and left alone.
+#
+# Edit it HERE, not in /etc/pihole/ or the web UI's settings pages - a value
+# changed there is reverted the next time the installer runs. The previous
+# resolver drifted into taking DNS down by being hand-edited on the host;
+# tests/test_pihole_config.py guards the traps.
+
+[dns]
+# Same upstreams the old dnsmasq resolver forwarded to.
+upstreams = ["1.1.1.1", "8.8.8.8"]
+
+# Tailnet only. An open resolver on the LAN or a public interface is a DNS
+# amplification vector, and nothing on the home LAN points here anyway.
+interface = "tailscale0"
+
+# SINGLE, NEVER "BIND". BIND emits dnsmasq's bind-interfaces, which snapshots
+# interface addresses once at startup. tailscaled's unit goes active long
+# before tailscale0 has an IPv4 address, so FTL would bind nothing on the
+# tailnet and stay "active (running)" doing it - the exact failure that took
+# DNS down for every tailnet device under plain dnsmasq. SINGLE listens on the
+# wildcard address and filters by interface, so it answers whenever the
+# address appears.
+listeningMode = "SINGLE"
+
+# The bare-name shortcuts (http://llm, ...). nginx answers on these names on
+# port 80; Pi-hole just points them at this machine. Exact-name records: unlike
+# the old dnsmasq `address=/llm/...`, foo.llm does not match.
+hosts = [
+  "__TAILSCALE_IP__ status",
+  "__TAILSCALE_IP__ llm",
+  "__TAILSCALE_IP__ cigboard",
+  "__TAILSCALE_IP__ voice",
+  "__TAILSCALE_IP__ pihole",
+]
+
+domainNeeded = true
+bogusPriv = true
+
+[database]
+# The query log records which tailnet device looked up which domain, and
+# housemates' devices are on the tailnet too. A week is enough to debug "why
+# did this break yesterday"; FTL's default of 91 days is a record of everyone's
+# browsing nobody asked for.
+maxDBdays = 7
+
+[webserver]
+# Loopback only; nginx publishes it as http://pihole. The default binds 80/443
+# on every address, which collides with nginx on the tailnet IP.
+port = "127.0.0.1:8797"
+
+[misc]
+# Don't read /etc/dnsmasq.d. That directory belonged to the old resolver, and
+# the dnsmasq package's unit loads every non-.conf file in it as config.
+etc_dnsmasq_d = false

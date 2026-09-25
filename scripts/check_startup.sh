@@ -20,7 +20,7 @@ check_service() {
 
 echo "== Services =="
 check_service tailscaled.service
-check_service dnsmasq.service
+check_service pihole-FTL.service
 check_service discord-llm-bot.service
 check_service voice-listener.service
 
@@ -36,8 +36,8 @@ fi
 
 echo
 echo "== Tailnet resolver (the llm/cigboard/status/voice shortcuts) =="
-# "systemctl is-active dnsmasq" is not enough: dnsmasq can be up and bound to
-# nothing on the tailnet, which is silent from systemd's side but breaks every
+# "systemctl is-active pihole-FTL" is not enough: the resolver can be up and
+# bound to nothing on the tailnet, which is silent from systemd's side but breaks every
 # device that accepts Tailscale DNS -- including their plain internet lookups,
 # since this resolver is what forwards those too.
 if ! command -v dig >/dev/null 2>&1; then
@@ -50,7 +50,7 @@ else
       echo "OK    $tailscale_ip resolves $name"
       ok=$((ok + 1))
     else
-      echo "FAIL  $tailscale_ip does not answer for $name (dnsmasq bound to the wrong interface?)"
+      echo "FAIL  $tailscale_ip does not answer for $name (pihole-FTL bound to the wrong interface?)"
       fail=$((fail + 1))
     fi
   done

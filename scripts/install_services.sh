@@ -20,26 +20,28 @@ echo "== Installing unit files =="
 install -m 644 "$REPO_DIR/discord-llm-bot.service" /etc/systemd/system/discord-llm-bot.service
 install -m 644 "$REPO_DIR/voice-listener.service" /etc/systemd/system/voice-listener.service
 
-echo "== Installing dnsmasq drop-in (wait for tailscale0, retry on failure) =="
-mkdir -p /etc/systemd/system/dnsmasq.service.d
-install -m 644 "$REPO_DIR/scripts/systemd/dnsmasq-override.conf" /etc/systemd/system/dnsmasq.service.d/override.conf
+echo "== Retiring the old dnsmasq resolver (Pi-hole replaces it) =="
+# Pi-hole's FTL is a dnsmasq fork and needs port 53 on the same addresses, so
+# the dnsmasq package's own service has to stay off. Masked, not just
+# disabled, so a package upgrade can't quietly start it again.
+if [ -e /lib/systemd/system/dnsmasq.service ]; then
+  systemctl disable --now dnsmasq.service 2>/dev/null || true
+  systemctl mask dnsmasq.service
+fi
+rm -rf /etc/systemd/system/dnsmasq.service.d
+if [ -f /etc/dnsmasq.d/status.conf ]; then
+  mkdir -p /etc/dnsmasq.d.backups
+  mv /etc/dnsmasq.d/status.conf /etc/dnsmasq.d.backups/status.conf.retired-for-pihole
+fi
 
-echo "== Clearing stray files out of /etc/dnsmasq.d =="
-# dnsmasq's ExecStart passes `-7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new`,
-# which loads EVERY file in that directory except those three suffixes. A
-# status.conf.bak-* left alongside is live config, not a backup - two of them
-# had been silently merged into the running config for weeks, and one carried
-# the stale bind-interfaces line this script exists to replace.
-mkdir -p /etc/dnsmasq.d.backups
-while IFS= read -r stray; do
-  [ -n "$stray" ] || continue
-  echo "  moving $(basename "$stray") -> /etc/dnsmasq.d.backups/ (it was being loaded as config)"
-  mv "$stray" /etc/dnsmasq.d.backups/
-done < <(find /etc/dnsmasq.d -maxdepth 1 -type f ! -name '*.conf' ! -name README)
+echo "== Installing Pi-hole drop-in (start after tailscaled) =="
+mkdir -p /etc/systemd/system/pihole-FTL.service.d
+install -m 644 "$REPO_DIR/scripts/systemd/pihole-FTL-override.conf" /etc/systemd/system/pihole-FTL.service.d/override.conf
 
-echo "== Installing tailnet shortcut resolver =="
-# The records point at this machine's own tailnet IP, which is different on
-# every machine - render it in rather than shipping whatever the last host had.
+echo "== Rendering Pi-hole settings =="
+# The shortcut records point at this machine's own tailnet IP, which is
+# different on every machine - render it in rather than shipping whatever the
+# last host had.
 TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
 if [ -z "$TAILSCALE_IP" ]; then
   echo "  FAILED: tailscale has no IPv4 address yet, so the shortcut records" >&2
@@ -47,10 +49,31 @@ if [ -z "$TAILSCALE_IP" ]; then
   exit 1
 fi
 echo "  rendering shortcut records to $TAILSCALE_IP"
-sed "s/__TAILSCALE_IP__/$TAILSCALE_IP/g" "$REPO_DIR/scripts/dnsmasq/status.conf" \
-  > /etc/dnsmasq.d/status.conf
-chmod 644 /etc/dnsmasq.d/status.conf
-dnsmasq --test
+PIHOLE_SETTINGS="$(mktemp)"
+trap 'rm -f "$PIHOLE_SETTINGS"' EXIT
+sed "s/__TAILSCALE_IP__/$TAILSCALE_IP/g" "$REPO_DIR/scripts/pihole/pihole.toml" > "$PIHOLE_SETTINGS"
+
+if ! command -v pihole-FTL >/dev/null 2>&1; then
+  echo "== Installing Pi-hole =="
+  # A pihole.toml already in place is what makes the installer run without
+  # dialogs, and means FTL's very first start is already tailnet-only.
+  install -d -m 755 /etc/pihole
+  [ -f /etc/pihole/pihole.toml ] || install -m 644 "$PIHOLE_SETTINGS" /etc/pihole/pihole.toml
+  # Only the initial subscription - after install, blocklists are managed in the web UI.
+  [ -f /etc/pihole/adlists.list ] || \
+    echo "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt" > /etc/pihole/adlists.list
+  curl -sSL https://install.pi-hole.net | bash -s -- --unattended
+  # FTL starts before gravity finishes building, and doesn't block anything
+  # until it's told to pick the new lists up.
+  pihole reloadlists
+  echo "  set the web UI password with: sudo pihole setpassword"
+fi
+
+echo "== Applying Pi-hole settings =="
+python3 "$REPO_DIR/scripts/pihole/apply_settings.py" "$PIHOLE_SETTINGS" |
+  while IFS=$'\t' read -r key value; do
+    pihole-FTL --config "$key" "$value" >/dev/null
+  done
 
 echo "== Installing persistent journal config =="
 mkdir -p /etc/systemd/journald.conf.d
@@ -61,10 +84,10 @@ systemctl daemon-reload
 systemctl restart systemd-journald
 
 echo "== Enabling services for boot (not starting anything live) =="
-systemctl enable tailscaled.service dnsmasq.service discord-llm-bot.service voice-listener.service
+systemctl enable tailscaled.service pihole-FTL.service discord-llm-bot.service voice-listener.service
 
-echo "== Applying dnsmasq fix now (only rebinds the tailscale0-only resolver, no LAN impact) =="
-systemctl restart dnsmasq.service
+echo "== Restarting Pi-hole (only the tailscale0-only resolver, no LAN impact) =="
+systemctl restart pihole-FTL.service
 
 echo
 echo "Done. discord-llm-bot and voice-listener are enabled for next boot but"

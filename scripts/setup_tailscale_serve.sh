@@ -6,7 +6,7 @@
 #
 # This covers the PATH form only - https://<host>.<tailnet>.ts.net/llm/ and so
 # on. The bare-name shortcuts (http://llm) are DNS, handled separately by
-# dnsmasq via scripts/dnsmasq/status.conf; no certificate can cover a bare name,
+# Pi-hole via scripts/pihole/pihole.toml; no certificate can cover a bare name,
 # which is why those stay plain HTTP and why Serve cannot do them.
 #
 # Requires tailscale >= 1.48 for --set-path. Idempotent: re-running resets the
