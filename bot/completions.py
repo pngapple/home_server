@@ -34,7 +34,24 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 # Statuses meaning "not serving right now" rather than "your request is wrong".
 _UNAVAILABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
+# Failures meaning nothing is listening, as opposed to a dropped read mid-reply.
+_NOT_THERE = (requests.ConnectionError, requests.ConnectTimeout)
+
 _session = requests.Session()
+
+# A sleeping PC on the tailnet doesn't refuse a connection, it just never
+# answers — so without this, the full read timeout elapses before falling
+# back. An awake server accepts in milliseconds; only the read deserves to be
+# long, since the first request after a wake may wait on a cold model load.
+LOCAL_CONNECT_TIMEOUT_S = 3
+
+# Once a local endpoint fails to answer, go straight to the fallback for this
+# long. A turn can make several calls (tool loops, plus moderation), and each
+# would otherwise pay the connect timeout again while the box sleeps.
+LOCAL_COOLDOWN_S = 60
+
+# endpoint base -> time.monotonic() before which it's presumed down.
+_down_until: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
@@ -79,10 +96,15 @@ def post(
     fallback: Endpoint | None = None,
 ) -> tuple[requests.Response, Endpoint]:
     """Returns the response and the endpoint that actually served it."""
+    can_fall_back = fallback is not None and fallback.base != endpoint.base
+    if can_fall_back and _down_until.get(endpoint.base, 0) > time.monotonic():
+        return _attempt(payload, fallback, timeout, attempts, backoff_s), fallback
     try:
         return _attempt(payload, endpoint, timeout, attempts, backoff_s), endpoint
     except Unavailable as exc:
-        if fallback is None or fallback.base == endpoint.base:
+        if not endpoint.is_openrouter:
+            _down_until[endpoint.base] = time.monotonic() + LOCAL_COOLDOWN_S
+        if not can_fall_back:
             raise exc.cause
         log.warning(
             "%s did not answer (%s); falling back to %s with model %s",
@@ -105,6 +127,8 @@ def _attempt(
         # purposes; local servers ignore it.
         "X-Title": endpoint.title,
     }
+    if not endpoint.is_openrouter:
+        timeout = (LOCAL_CONNECT_TIMEOUT_S, timeout)
     for attempt in range(1, attempts + 1):
         last = attempt == attempts
         try:
@@ -112,7 +136,9 @@ def _attempt(
                 f"{endpoint.base}/chat/completions", headers=headers, json=body, timeout=timeout
             )
         except requests.RequestException as exc:
-            if last:
+            # Retrying a local box that didn't even accept the connection only
+            # doubles the wait before falling back.
+            if last or (not endpoint.is_openrouter and isinstance(exc, _NOT_THERE)):
                 raise Unavailable(exc) from exc
             log.warning("%s request failed (attempt %d), retrying", endpoint.base, attempt, exc_info=True)
         else:

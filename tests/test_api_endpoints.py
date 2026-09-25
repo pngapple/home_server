@@ -213,3 +213,74 @@ def test_no_call_site_hardcodes_the_api_host(path):
 
     source = (Path(__file__).resolve().parent.parent / path).read_text()
     assert "openrouter.ai" not in source, f"{path} hardcodes the API host; read it from config instead"
+
+
+# ---------------------------------------------------------------- asleep, not refusing
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cooldowns():
+    completions._down_until.clear()
+    yield
+    completions._down_until.clear()
+
+
+def test_a_local_endpoint_gets_a_short_connect_timeout(monkeypatch):
+    """A sleeping PC on the tailnet doesn't refuse the connection — it never
+    answers, so the whole timeout elapses. With the chat path's 60s timeout
+    and a retry, that was two minutes per call before falling back. Connecting
+    to an awake server takes milliseconds; only the read deserves to be long
+    (a cold model load)."""
+    seen = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.append((url, timeout))
+        return _response()
+
+    monkeypatch.setattr(completions._session, "post", fake_post)
+    completions.post({"messages": []}, _endpoint(LOCAL), timeout=60)
+    completions.post({"messages": []}, _endpoint(OPENROUTER), timeout=60)
+
+    assert seen[0][1] == (completions.LOCAL_CONNECT_TIMEOUT_S, 60)
+    assert seen[1][1] == 60
+
+
+def test_an_unreachable_local_endpoint_is_not_retried(http):
+    """Retrying a box that just failed to answer only doubles the wait."""
+    http.behaviour[LOCAL] = requests.ConnectTimeout("asleep")
+
+    completions.post(
+        {"messages": []}, _endpoint(LOCAL), timeout=5, attempts=2, backoff_s=0,
+        fallback=_endpoint(OPENROUTER),
+    )
+
+    assert [c["url"] for c in http.calls] == [
+        f"{LOCAL}/chat/completions",
+        f"{OPENROUTER}/chat/completions",
+    ]
+
+
+def test_a_down_local_endpoint_is_skipped_until_its_cooldown_ends(monkeypatch, http):
+    """One turn can make several calls (tool loops) plus moderation. Paying the
+    connect timeout on each of them while the PC sleeps adds up; once is enough."""
+    now = [1000.0]
+    monkeypatch.setattr(completions.time, "monotonic", lambda: now[0])
+    http.behaviour[LOCAL] = requests.ConnectTimeout("asleep")
+    args = ({"messages": []}, _endpoint(LOCAL))
+    kw = dict(timeout=5, fallback=_endpoint(OPENROUTER))
+
+    completions.post(*args, **kw)
+    completions.post(*args, **kw)
+    assert [c["url"].split("/chat")[0] for c in http.calls] == [LOCAL, OPENROUTER, OPENROUTER]
+
+    del http.behaviour[LOCAL]
+    now[0] += completions.LOCAL_COOLDOWN_S + 1
+    _, served = completions.post(*args, **kw)
+    assert served.base == LOCAL
+
+
+def test_the_cooldown_never_strands_a_call_with_nowhere_to_go(http):
+    """Without a fallback, skipping the endpoint would mean not trying at all."""
+    completions._down_until[LOCAL] = float("inf")
+    _, served = completions.post({"messages": []}, _endpoint(LOCAL), timeout=5)
+    assert served.base == LOCAL
